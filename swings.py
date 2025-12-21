@@ -1,132 +1,280 @@
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
+from typing import Tuple, List
+
+# ----------------------------
+# Type Aliases (for clarity)
+# ----------------------------
+SwingResult = pd.DataFrame
 
 
-def detect_swing_points(df: pd.DataFrame, half_window: int = 2) -> pd.DataFrame:
+def _validate_inputs(df: pd.DataFrame, half_window: int) -> None:
+    """Validate input DataFrame and half_window parameter.
+
+    Args:
+        df: Input DataFrame to validate.
+        half_window: Lookback/lookforward window size.
+
+    Raises:
+        ValueError: If `half_window` is not a positive integer.
+        KeyError: If 'High' or 'Low' columns are missing from `df`.
     """
-    Detect Swing Highs and Swing Lows in OHLC data.
+    if not isinstance(half_window, int) or half_window < 1:
+        raise ValueError(f"half_window must be a positive integer, got {half_window}")
 
-    Algorithm:
-    1. Find all local maxima/minima (swing candidates)
-    2. Filter to ensure alternation (high-low-high-low...)
-    3. Optionally, keep only the most extreme when same-type occurs
+    required_cols = {'High', 'Low'}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise KeyError(f"Missing required columns: {missing}. DataFrame must contain 'High' and 'Low'.")
 
-    :param df : pd.DataFrame, Must contain 'High' and 'Low' columns.
-    :param half_window : int. Lookback/lookforward window (number of candles on each side to compare).
-        Must be >= 1.
 
-    :return pd.DataFrame with boolean columns:
-        - 'is_swing_high'
-        - 'is_swing_low'
+def _detect_swing_candidates(
+        high: np.ndarray,
+        low: np.ndarray,
+        half_window: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Detect initial swing high and low candidates
+
+    Args:
+        high: Array of high prices.
+        low: Array of low prices.
+        half_window: Number of bars to look left/right for validation.
+
+    Returns:
+        A tuple of two boolean arrays:
+            - First: swing high candidates
+            - Second: swing low candidates
+
+    Note:
+        Boundary regions (first and last `half_window` bars) are explicitly
+        set to False to avoid edge artifacts.
     """
-
-    if half_window < 1:
-        raise ValueError("Lookback 'n' must be >= 1")
-
-    high = df['high'].values
-    low = df['low'].values
-    length = len(df)
-
-    # Step 1: Find swing candidates using vectorized operations
     window_size = 2 * half_window + 1
 
-    # Find local maxima (swing high candidates)
     high_max = maximum_filter1d(high, size=window_size, mode='constant')
-    is_swing_high_candidate = (high == high_max)
-
-    # Find local minima (swing low candidates)
     low_min = minimum_filter1d(low, size=window_size, mode='constant')
-    is_swing_low_candidate = (low == low_min)
 
-    # Exclude boundaries
-    is_swing_high_candidate[:half_window] = False
-    is_swing_high_candidate[-half_window:] = False
-    is_swing_low_candidate[:half_window] = False
-    is_swing_low_candidate[-half_window:] = False
+    sh_candidates = (high == high_max)
+    sl_candidates = (low == low_min)
 
-    # Ensure strict inequality (optional but recommended)
-    is_swing_high_candidate &= (high > np.roll(high, 1)) & (high > np.roll(high, -1))
-    is_swing_low_candidate &= (low < np.roll(low, 1)) & (low < np.roll(low, -1))
+    # Invalidate edges
+    sh_candidates[:half_window] = False
+    sh_candidates[-half_window:] = False
+    sl_candidates[:half_window] = False
+    sl_candidates[-half_window:] = False
 
-    # Handle edge cases for roll operation
-    is_swing_high_candidate[0] = False
-    is_swing_high_candidate[-1] = False
-    is_swing_low_candidate[0] = False
-    is_swing_low_candidate[-1] = False
+    return sh_candidates, sl_candidates
 
-    # Step 2: Resolve conflicts (points that are both high and low)
-    # Keep only one type based on relative extremity
-    conflict_mask = is_swing_high_candidate & is_swing_low_candidate
 
-    if conflict_mask.any():
-        # For conflicting points, choose based on which is more extreme
-        high_range = high - low
-        high_extremity = high - np.minimum(np.roll(high, -half_window), np.roll(high, half_window))
-        low_extremity = np.maximum(np.roll(low, -half_window), np.roll(low, half_window)) - low
+def _enforce_strict_extrema(
+        high: np.ndarray,
+        low: np.ndarray,
+        sh_candidates: np.ndarray,
+        sl_candidates: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Enforce strict local extrema by requiring strict inequality with neighbors.
 
-        # Prefer the type with greater relative extremity
-        prefer_high = high_extremity > low_extremity
+    Removes candidates that are part of flat plateaus (e.g., equal highs/lows).
 
-        is_swing_high_candidate[conflict_mask] = prefer_high[conflict_mask]
-        is_swing_low_candidate[conflict_mask] = ~prefer_high[conflict_mask]
+    Args:
+        high: Array of high prices.
+        low: Array of low prices.
+        sh_candidates: Boolean array of swing high candidates.
+        sl_candidates: Boolean array of swing low candidates.
 
-    # Step 3: Build arrays of swing indices and types
-    swing_indices = []
-    swing_types = []
+    Returns:
+        Updated swing high and low candidate arrays with plateaus removed.
 
-    # Get indices where swings occur
-    high_indices = np.where(is_swing_high_candidate)[0]
-    low_indices = np.where(is_swing_low_candidate)[0]
+    Note:
+        Uses np.roll (which wraps), so first and last bars are manually set to False.
+    """
+    # Compare with immediate neighbors (allows wrap — we'll fix edges)
+    sh_strict = (high > np.roll(high, 1)) & (high > np.roll(high, -1))
+    sl_strict = (low < np.roll(low, 1)) & (low < np.roll(low, -1))
 
-    # Combine and sort by index
-    all_swings = []
-    for idx in high_indices:
-        all_swings.append((idx, 'high', high[idx]))
-    for idx in low_indices:
-        all_swings.append((idx, 'low', low[idx]))
+    sh_candidates &= sh_strict
+    sl_candidates &= sl_strict
 
-    # Sort by index
-    all_swings.sort(key=lambda x: x[0])
+    # Fix boundary artifacts from np.roll (first/last bars)
+    sh_candidates[0] = sh_candidates[-1] = False
+    sl_candidates[0] = sl_candidates[-1] = False
 
-    # Step 4: Enforce alternation (single pass)
-    if all_swings:
-        final_swings = [all_swings[0]]
+    return sh_candidates, sl_candidates
 
-        for i in range(1, len(all_swings)):
-            current_idx, current_type, current_price = all_swings[i]
-            last_idx, last_type, last_price = final_swings[-1]
 
-            if current_type == last_type:
-                # Same type - keep the more extreme one
-                if (current_type == 'high' and current_price > last_price) or \
-                        (current_type == 'low' and current_price < last_price):
-                    # Replace with more extreme swing
-                    final_swings[-1] = all_swings[i]
-                # else: keep the previous one
-            else:
-                # Different type - check if reasonable distance
-                # (Optional: add minimum distance filter here)
-                final_swings.append(all_swings[i])
+def _resolve_conflicts(
+        high: np.ndarray,
+        low: np.ndarray,
+        sh_candidates: np.ndarray,
+        sl_candidates: np.ndarray,
+        half_window: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Resolve points that are both swing high and swing low candidates.
 
-        # Convert to final arrays
-        swing_indices = [s[0] for s in final_swings]
-        swing_types = [s[1] for s in final_swings]
+    For ambiguous points, selects the type (high or low) with greater
+    relative extremity compared to neighbors at ±`half_window`.
 
-    # Step 5: Create output DataFrame
-    swing_type_result = pd.Series(pd.NA, index=df.index, dtype='object')
-    is_swing_high_result = pd.Series(False, index=df.index, dtype=bool)
-    is_swing_low_result = pd.Series(False, index=df.index, dtype=bool)
+    Args:
+        high: Array of high prices.
+        low: Array of low prices.
+        sh_candidates: Boolean array of swing high candidates.
+        sl_candidates: Boolean array of swing low candidates.
+        half_window: Window size used for extremity comparison.
+
+    Returns:
+        Updated candidate arrays where no point is both a swing high and low.
+    """
+    conflict = sh_candidates & sl_candidates
+    if not np.any(conflict):
+        return sh_candidates, sl_candidates
+
+    # Extremity relative to ±half_window neighbors
+    left_high = np.roll(high, half_window)
+    right_high = np.roll(high, -half_window)
+    high_extremity = high - np.minimum(left_high, right_high)
+
+    left_low = np.roll(low, half_window)
+    right_low = np.roll(low, -half_window)
+    low_extremity = np.maximum(left_low, right_low) - low
+
+    prefer_high = high_extremity > low_extremity
+
+    sh_candidates = sh_candidates.copy()
+    sl_candidates = sl_candidates.copy()
+
+    sh_candidates[conflict] = prefer_high[conflict]
+    sl_candidates[conflict] = ~prefer_high[conflict]
+
+    return sh_candidates, sl_candidates
+
+
+def _enforce_alternation(
+        high: np.ndarray,
+        low: np.ndarray,
+        sh_candidates: np.ndarray,
+        sl_candidates: np.ndarray
+) -> Tuple[List[int], List[str]]:
+    """Enforce alternating swing sequence (high → low → high...).
+
+    Merges consecutive same-type swings by keeping the most extreme,
+    and ensures swings alternate between high and low.
+
+    Args:
+        high: Array of high prices.
+        low: Array of low prices.
+        sh_candidates: Final swing high candidate mask.
+        sl_candidates: Final swing low candidate mask.
+
+    Returns:
+        A tuple of two lists:
+            - First: list of swing indices (int)
+            - Second: list of swing types ('high' or 'low')
+    """
+    swings: List[Tuple[int, str, float]] = []
+
+    # Add swing highs
+    for idx in np.where(sh_candidates)[0]:
+        swings.append((int(idx), 'high', float(high[idx])))
+
+    # Add swing lows
+    for idx in np.where(sl_candidates)[0]:
+        swings.append((int(idx), 'low', float(low[idx])))
+
+    if not swings:
+        return [], []
+
+    # Sort by index (time order)
+    swings.sort(key=lambda x: x[0])
+
+    # Enforce alternation and extremity
+    final = [swings[0]]
+    for i in range(1, len(swings)):
+        curr_idx, curr_type, curr_price = swings[i]
+        last_idx, last_type, last_price = final[-1]
+
+        if curr_type == last_type:
+            # Same type: keep more extreme
+            if (curr_type == 'high' and curr_price > last_price) or \
+                    (curr_type == 'low' and curr_price < last_price):
+                final[-1] = swings[i]
+        else:
+            final.append(swings[i])
+
+    indices = [s[0] for s in final]
+    types = [s[1] for s in final]
+    return indices, types
+
+
+def _build_output(
+        df: pd.DataFrame,
+        swing_indices: List[int],
+        swing_types: List[str]
+) -> SwingResult:
+    """
+    Args:
+        df: Original input DataFrame.
+        swing_indices: List of integer indices where swings occur.
+        swing_types: List of swing types ('high' or 'low').
+
+    Returns:
+        DataFrame with same index as `df` and three new columns:
+            - 'swing_type'
+            - 'is_swing_high'
+            - 'is_swing_low'
+    """
+    index = df.index
+    swing_type = pd.Series(pd.NA, index=index, dtype="object")
+    is_swing_high = pd.Series(False, index=index, dtype=bool)
+    is_swing_low = pd.Series(False, index=index, dtype=bool)
 
     for idx, typ in zip(swing_indices, swing_types):
-        swing_type_result.iloc[idx] = typ
+        swing_type.iloc[idx] = typ
         if typ == 'high':
-            is_swing_high_result.iloc[idx] = True
+            is_swing_high.iloc[idx] = True
         else:
-            is_swing_low_result.iloc[idx] = True
+            is_swing_low.iloc[idx] = True
 
     return pd.DataFrame({
-        'swing_type': swing_type_result,
-        'is_swing_high': is_swing_high_result,
-        'is_swing_low': is_swing_low_result
+        'swing_type': swing_type,
+        'is_swing_high': is_swing_high,
+        'is_swing_low': is_swing_low
     })
+
+
+def detect_swing_points(
+        df: pd.DataFrame,
+        half_window: int = 2
+) -> SwingResult:
+    """Detect alternating Swing Highs and Swing Lows in OHLC price data.
+
+    Args:
+        df: Input DataFrame containing at least 'High' and 'Low' columns.
+            The index may be of any type (e.g., pd.DatetimeIndex).
+        half_window: Number of bars to look left and right to validate a swing.
+            Must be a positive integer. Default is 2, meaning a 5-bar window
+            (2 left + current + 2 right).
+
+    Returns:
+        A DataFrame with the same index as `df`, containing:
+            - 'swing_type': pd.Series with values 'high', 'low', or pd.NA
+            - 'is_swing_high': pd.Series[bool] indicating swing highs
+            - 'is_swing_low': pd.Series[bool] indicating swing lows
+
+    Raises:
+        ValueError: If `half_window` is not a positive integer.
+        KeyError: If the input DataFrame is missing 'High' or 'Low' columns.
+        """
+    _validate_inputs(df, half_window)
+
+    high = df['High'].values.astype(np.float64)
+    low = df['Low'].values.astype(np.float64)
+
+    sh_candidates, sl_candidates = _detect_swing_candidates(high, low, half_window)
+    sh_candidates, sl_candidates = _enforce_strict_extrema(high, low, sh_candidates, sl_candidates)
+    sh_candidates, sl_candidates = _resolve_conflicts(high, low, sh_candidates, sl_candidates, half_window)
+    swing_indices, swing_types = _enforce_alternation(high, low, sh_candidates, sl_candidates)
+
+    return _build_output(df, swing_indices, swing_types)
