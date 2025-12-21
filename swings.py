@@ -1,66 +1,132 @@
 import pandas as pd
 import numpy as np
+from scipy.ndimage import maximum_filter1d, minimum_filter1d
 
 
-def detect_swing_points(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
+def detect_swing_points(df: pd.DataFrame, half_window: int = 2) -> pd.DataFrame:
     """
     Detect Swing Highs and Swing Lows in OHLC data.
 
-    Parameters:
-    -----------
-    df : pd.DataFrame
-        Must contain 'High' and 'Low' columns.
-    n : int
-        Lookback/lookforward window (number of candles on each side to compare).
+    Algorithm:
+    1. Find all local maxima/minima (swing candidates)
+    2. Filter to ensure alternation (high-low-high-low...)
+    3. Optionally, keep only the most extreme when same-type occurs
+
+    :param df : pd.DataFrame, Must contain 'High' and 'Low' columns.
+    :param half_window : int. Lookback/lookforward window (number of candles on each side to compare).
         Must be >= 1.
 
-    Returns:
-    --------
-    pd.DataFrame with boolean columns:
+    :return pd.DataFrame with boolean columns:
         - 'is_swing_high'
         - 'is_swing_low'
     """
-    if n < 1:
-        raise ValueError("Lookback period 'n' must be at least 1.")
 
-    high = df['High']
-    low = df['Low']
+    if half_window < 1:
+        raise ValueError("Lookback 'n' must be >= 1")
 
-    # Rolling window: check if current high is the max in [i-n, i+n]
-    # We use rolling with center=True to align window around each point
-    window_size = 2 * n + 1
+    high = df['high'].values
+    low = df['low'].values
+    length = len(df)
 
-    # For swing high: current high == max over window AND not flat (to avoid plateaus)
-    rolling_high = high.rolling(window=window_size, center=True).max()
-    rolling_low = low.rolling(window=window_size, center=True).min()
+    # Step 1: Find swing candidates using vectorized operations
+    window_size = 2 * half_window + 1
 
-    is_swing_high = (high == rolling_high)
-    is_swing_low = (low == rolling_low)
+    # Find local maxima (swing high candidates)
+    high_max = maximum_filter1d(high, size=window_size, mode='constant')
+    is_swing_high_candidate = (high == high_max)
 
-    # Optional: Exclude flat regions (where multiple candles share same high/low)
-    # To enforce strict inequality: current > all neighbors
-    # We do this by checking neighbors directly
-    is_swing_high = (
-            (high > high.shift(1)) &
-            (high > high.shift(-1))
-    )
-    is_swing_low = (
-            (low < low.shift(1)) &
-            (low < low.shift(-1))
-    )
+    # Find local minima (swing low candidates)
+    low_min = minimum_filter1d(low, size=window_size, mode='constant')
+    is_swing_low_candidate = (low == low_min)
 
-    # Now extend to 'n' candles on each side
-    for i in range(2, n + 1):
-        is_swing_high &= (high > high.shift(i)) & (high > high.shift(-i))
-        is_swing_low &= (low < low.shift(i)) & (low < low.shift(-i))
+    # Exclude boundaries
+    is_swing_high_candidate[:half_window] = False
+    is_swing_high_candidate[-half_window:] = False
+    is_swing_low_candidate[:half_window] = False
+    is_swing_low_candidate[-half_window:] = False
 
-    # Handle boundaries: first n and last n rows can't be swing points
-    is_swing_high.iloc[:n] = False
-    is_swing_high.iloc[-n:] = False
-    is_swing_low.iloc[:n] = False
-    is_swing_low.iloc[-n:] = False
+    # Ensure strict inequality (optional but recommended)
+    is_swing_high_candidate &= (high > np.roll(high, 1)) & (high > np.roll(high, -1))
+    is_swing_low_candidate &= (low < np.roll(low, 1)) & (low < np.roll(low, -1))
+
+    # Handle edge cases for roll operation
+    is_swing_high_candidate[0] = False
+    is_swing_high_candidate[-1] = False
+    is_swing_low_candidate[0] = False
+    is_swing_low_candidate[-1] = False
+
+    # Step 2: Resolve conflicts (points that are both high and low)
+    # Keep only one type based on relative extremity
+    conflict_mask = is_swing_high_candidate & is_swing_low_candidate
+
+    if conflict_mask.any():
+        # For conflicting points, choose based on which is more extreme
+        high_range = high - low
+        high_extremity = high - np.minimum(np.roll(high, -half_window), np.roll(high, half_window))
+        low_extremity = np.maximum(np.roll(low, -half_window), np.roll(low, half_window)) - low
+
+        # Prefer the type with greater relative extremity
+        prefer_high = high_extremity > low_extremity
+
+        is_swing_high_candidate[conflict_mask] = prefer_high[conflict_mask]
+        is_swing_low_candidate[conflict_mask] = ~prefer_high[conflict_mask]
+
+    # Step 3: Build arrays of swing indices and types
+    swing_indices = []
+    swing_types = []
+
+    # Get indices where swings occur
+    high_indices = np.where(is_swing_high_candidate)[0]
+    low_indices = np.where(is_swing_low_candidate)[0]
+
+    # Combine and sort by index
+    all_swings = []
+    for idx in high_indices:
+        all_swings.append((idx, 'high', high[idx]))
+    for idx in low_indices:
+        all_swings.append((idx, 'low', low[idx]))
+
+    # Sort by index
+    all_swings.sort(key=lambda x: x[0])
+
+    # Step 4: Enforce alternation (single pass)
+    if all_swings:
+        final_swings = [all_swings[0]]
+
+        for i in range(1, len(all_swings)):
+            current_idx, current_type, current_price = all_swings[i]
+            last_idx, last_type, last_price = final_swings[-1]
+
+            if current_type == last_type:
+                # Same type - keep the more extreme one
+                if (current_type == 'high' and current_price > last_price) or \
+                        (current_type == 'low' and current_price < last_price):
+                    # Replace with more extreme swing
+                    final_swings[-1] = all_swings[i]
+                # else: keep the previous one
+            else:
+                # Different type - check if reasonable distance
+                # (Optional: add minimum distance filter here)
+                final_swings.append(all_swings[i])
+
+        # Convert to final arrays
+        swing_indices = [s[0] for s in final_swings]
+        swing_types = [s[1] for s in final_swings]
+
+    # Step 5: Create output DataFrame
+    swing_type_result = pd.Series(pd.NA, index=df.index, dtype='object')
+    is_swing_high_result = pd.Series(False, index=df.index, dtype=bool)
+    is_swing_low_result = pd.Series(False, index=df.index, dtype=bool)
+
+    for idx, typ in zip(swing_indices, swing_types):
+        swing_type_result.iloc[idx] = typ
+        if typ == 'high':
+            is_swing_high_result.iloc[idx] = True
+        else:
+            is_swing_low_result.iloc[idx] = True
 
     return pd.DataFrame({
-        'is_swing_high': is_swing_high,
-        'is_swing_low': is_swing_low
+        'swing_type': swing_type_result,
+        'is_swing_high': is_swing_high_result,
+        'is_swing_low': is_swing_low_result
     })
