@@ -20,15 +20,15 @@ def _validate_inputs(df: pd.DataFrame, half_window: int) -> None:
 
     Raises:
         ValueError: If `half_window` is not a positive integer.
-        KeyError: If 'High' or 'Low' columns are missing from `df`.
+        KeyError: If 'high' or 'Low' columns are missing from `df`.
     """
     if not isinstance(half_window, int) or half_window < 1:
         raise ValueError(f"half_window must be a positive integer, got {half_window}")
 
-    required_cols = {'High', 'Low'}
+    required_cols = {'high', 'low'}
     missing = required_cols - set(df.columns)
     if missing:
-        raise KeyError(f"Missing required columns: {missing}. DataFrame must contain 'High' and 'Low'.")
+        raise KeyError(f"Missing required columns: {missing}. DataFrame must contain 'high' and 'low'.")
 
 
 def _detect_swing_candidates(
@@ -251,7 +251,7 @@ def detect_swing_points(
     """Detect alternating Swing Highs and Swing Lows in OHLC price data.
 
     Args:
-        df: Input DataFrame containing at least 'High' and 'Low' columns.
+        df: Input DataFrame containing at least 'high' and 'low' columns.
             The index may be of any type (e.g., pd.DatetimeIndex).
         half_window: Number of bars to look left and right to validate a swing.
             Must be a positive integer. Default is 2, meaning a 5-bar window
@@ -265,12 +265,12 @@ def detect_swing_points(
 
     Raises:
         ValueError: If `half_window` is not a positive integer.
-        KeyError: If the input DataFrame is missing 'High' or 'Low' columns.
+        KeyError: If the input DataFrame is missing 'high' or 'low' columns.
         """
     _validate_inputs(df, half_window)
 
-    high = df['High'].values.astype(np.float64)
-    low = df['Low'].values.astype(np.float64)
+    high = df['high'].values.astype(np.float64)
+    low = df['low'].values.astype(np.float64)
 
     sh_candidates, sl_candidates = _detect_swing_candidates(high, low, half_window)
     sh_candidates, sl_candidates = _enforce_strict_extrema(high, low, sh_candidates, sl_candidates)
