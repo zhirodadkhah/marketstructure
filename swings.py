@@ -209,10 +209,10 @@ def _enforce_alternation(
 
 
 def _build_output(
-        df: pd.DataFrame,
-        swing_indices: List[int],
-        swing_types: List[str]
-) -> SwingResult:
+    df: pd.DataFrame,
+    swing_indices: List[int],
+    swing_types: List[str]
+) -> pd.DataFrame:
     """
     Args:
         df: Original input DataFrame.
@@ -220,15 +220,14 @@ def _build_output(
         swing_types: List of swing types ('high' or 'low').
 
     Returns:
-        DataFrame with same index as `df` and three new columns:
-            - 'swing_type'
-            - 'is_swing_high'
-            - 'is_swing_low'
+        DataFrame with same index as `df`, containing:
+            - All original columns
+            - Plus: 'swing_type', 'is_swing_high', 'is_swing_low'
     """
-    index = df.index
-    swing_type = pd.Series(pd.NA, index=index, dtype="object")
-    is_swing_high = pd.Series(False, index=index, dtype=bool)
-    is_swing_low = pd.Series(False, index=index, dtype=bool)
+
+    swing_type = pd.Series(pd.NA, index=df.index, dtype="object")
+    is_swing_high = pd.Series(False, index=df.index, dtype=bool)
+    is_swing_low = pd.Series(False, index=df.index, dtype=bool)
 
     for idx, typ in zip(swing_indices, swing_types):
         swing_type.iloc[idx] = typ
@@ -237,11 +236,13 @@ def _build_output(
         else:
             is_swing_low.iloc[idx] = True
 
-    return pd.DataFrame({
-        'swing_type': swing_type,
-        'is_swing_high': is_swing_high,
-        'is_swing_low': is_swing_low
-    })
+    # Add new columns to a copy of the original df
+    result = df.copy()
+    result['swing_type'] = swing_type
+    result['is_swing_high'] = is_swing_high
+    result['is_swing_low'] = is_swing_low
+
+    return result
 
 
 def detect_swing_points(
