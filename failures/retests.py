@@ -33,6 +33,10 @@ def _compute_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
             * 'atr': {atr_period}-period Average True Range, backfilled and floored at 0.001
     :note: Does not modify the original DataFrame.
     """
+    required_cols = {'open', 'high', 'low', 'close'}
+    if not required_cols.issubset(df.columns):
+        missing = required_cols - set(df.columns)
+        raise KeyError(f"_compute_metrics requires OHLC columns. Missing: {missing}")
     df = df.copy()
 
     # Pre-compute frequently used values
