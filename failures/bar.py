@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple, Set, Any
+from typing import Dict, List, Optional, Tuple, Set, Any, DefaultDict
 from dataclasses import dataclass
 import numpy as np
 from structure.failures.config import StructureBreakConfig
@@ -386,109 +386,65 @@ class BarProcessor:
             active_levels.pop(oldest_key, None)
 
     @staticmethod
-    def process_bar(
-            bar_index: int,
-            close: float,
-            high: float,
-            low: float,
-            open_price: float,
-            atr_val: float,
-            body_ratio: float,
-            is_bullish_body: bool,
-            is_bearish_body: bool,
-            trend: str,
-            prev_high: Optional[float],
-            prev_low: Optional[float],
-            swings: Dict[str, List[Dict[str, Any]]],
-            active_levels: Dict[Tuple[str, int], BreakLevel],
-            builder: ResultBuilder,
-            config: StructureBreakConfig,
-            close_location: float,
-            upper_wick_ratio: float,
-            lower_wick_ratio: float
+    def process_bar_vectorized(
+        bar_index: int,
+        close: float,
+        high: float,
+        low: float,
+        open_price: float,
+        atr_val: float,
+        body_ratio: float,
+        is_bullish_body: bool,
+        is_bearish_body: bool,
+        trend: str,
+        prev_high: Optional[float],
+        prev_low: Optional[float],
+        swings: Dict[str, List[Dict[str, Any]]],
+        active_levels: Dict[Tuple[str, int], BreakLevel],
+        builder: ResultBuilder,
+        config: StructureBreakConfig,
+        close_location: float,
+        upper_wick_ratio: float,
+        lower_wick_ratio: float,
+        momentum_queue: DefaultDict[int, List[BreakLevel]]  # ➕ added
     ) -> None:
         """
-        Process a single bar for structure break detection.
+        Process a single bar for structure break detection (vectorized inputs).
 
-        Note: This function follows the original pattern where momentum
-        continuation is handled separately in the main loop.
+        Note: Momentum continuation is now scheduled via `momentum_queue`
+        instead of being checked in a loop over active levels.
 
-        :param bar_index: Current bar index
-        :param close: Close price
-        :param high: High price
-        :param low: Low price
-        :param open_price: Open price (named to avoid shadowing 'open')
-        :param atr_val: Current ATR value
-        :param body_ratio: Body ratio of current candle
-        :param is_bullish_body: True if candle has bullish body
-        :param is_bearish_body: True if candle has bearish body
-        :param trend: Current trend ('uptrend' or 'downtrend')
-        :param prev_high: Previous bar's high price
-        :param prev_low: Previous bar's low price
-        :param swings: Dictionary of swing points
-        :param active_levels: Active break levels dictionary
-        :param builder: Result builder for recording signals
-        :param config: Structure break configuration
-        :param close_location: Close location within candle (0-1)
-        :param upper_wick_ratio: Upper wick ratio
-        :param lower_wick_ratio: Lower wick ratio
+        All other logic identical to original.
         """
-        # Calculate minimum move threshold
         min_move = atr_val * config.min_break_atr_mult
-
-        # Get break targets
         targets = BarProcessor._get_break_targets(swings, trend)
+        gap_breaks = BarProcessor._detect_gap_breaks(targets, open_price, min_move, bar_index)
 
-        # Check for gap breaks
-        gap_breaks = BarProcessor._detect_gap_breaks(
-            targets, open_price, min_move, bar_index
-        )
-
-        # Process potential new breaks
         BarProcessor._process_potential_breaks(
-            targets=targets,
-            gap_breaks=gap_breaks,
-            bar_index=bar_index,
-            close=close,
-            high=high,
-            low=low,
-            body_ratio=body_ratio,
-            is_bullish_body=is_bullish_body,
-            is_bearish_body=is_bearish_body,
-            close_location=close_location,
-            upper_wick_ratio=upper_wick_ratio,
-            lower_wick_ratio=lower_wick_ratio,
-            atr_val=atr_val,
-            min_move=min_move,
-            config=config,
-            active_levels=active_levels,
-            builder=builder
+            targets=targets, gap_breaks=gap_breaks, bar_index=bar_index,
+            close=close, high=high, low=low, body_ratio=body_ratio,
+            is_bullish_body=is_bullish_body, is_bearish_body=is_bearish_body,
+            close_location=close_location, upper_wick_ratio=upper_wick_ratio,
+            lower_wick_ratio=lower_wick_ratio, atr_val=atr_val, min_move=min_move,
+            config=config, active_levels=active_levels, builder=builder
         )
 
-        # Update existing active levels
-        keys_to_remove: Set[Tuple[str, int]] = set()
-
+        keys_to_remove = set()
         for key, level in active_levels.items():
             should_remove, failure_signal = BarProcessor._update_active_level(
-                level=level,
-                bar_index=bar_index,
-                close=close,
-                high=high,
-                low=low,
-                prev_high=prev_high,
-                prev_low=prev_low,
-                config=config,
-                builder=builder
+                level=level, bar_index=bar_index, close=close, high=high, low=low,
+                prev_high=prev_high, prev_low=prev_low, config=config, builder=builder
             )
-
             if should_remove:
                 keys_to_remove.add(key)
                 if failure_signal:
                     builder.set_signal(failure_signal, bar_index)
 
-        # Remove failed/completed levels
         for key in keys_to_remove:
-            active_levels.pop(key, None)
+            level = active_levels.pop(key, None)
+            # ➕ SCHEDULE MOMENTUM CHECK IF CONFIRMED BOS
+            if level and level.state == LevelState.CONFIRMED and level.role == 'bos':
+                momentum_check_idx = level.break_idx + config.momentum_continuation_bars
+                momentum_queue[momentum_check_idx].append(level)
 
-        # Cleanup to prevent memory bloat
         BarProcessor._cleanup_active_levels(active_levels, config.max_active_levels)
