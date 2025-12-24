@@ -1,4 +1,3 @@
-# structure/failures/calcs.py
 from typing import Dict
 import pandas as pd
 import numpy as np
@@ -8,25 +7,59 @@ def _fast_rolling_percentile(series: pd.Series, window: int) -> pd.Series:
     """
     Compute fast rolling percentile rank without O(n²) complexity.
     :param series: Input numeric series.
-    :param window: Rolling window size.
+    :param window: Rolling window size (must be > 0).
     :return: Series with values in [0.0, 1.0] representing percentile rank.
+        NaN values are preserved in the output.
     :note: For each bar i, computes rank of series[i] within series[i-window+1:i+1].
-    Uses simple counting for speed. Equivalent to .rank(pct=True) but O(n·window).
+    Uses optimized indexing to avoid redundant NaN checks.
+    Handles edge cases:
+        - window = 1 → always returns 1.0 for non-NaN values (correct)
+        - all-equal values → returns 1.0
+        - NaN in current or window → returns NaN
+    Complexity: O(n · k) where k = average number of valid values per window.
     """
     if len(series) == 0:
-        return pd.Series([], dtype=np.float32)
+        return pd.Series([], dtype=np.float32, index=series.index)
+
+    if window <= 0:
+        raise ValueError(f"Window must be > 0, got {window}")
+
+    # ➕ EARLY EXIT: window = 1 → always 1.0 for valid values
+    if window == 1:
+        result = np.where(~np.isnan(series.values), 1.0, np.nan)
+        return pd.Series(result, index=series.index, dtype=np.float32)
+
     values = series.values
     n = len(values)
-    result = np.zeros(n, dtype=np.float32)
-    for i in range(n):
-        start = max(0, i - window + 1)
-        window_vals = values[start:i + 1]
-        if len(window_vals) > 0:
-            rank_val = np.sum(window_vals <= values[i])
-            result[i] = rank_val / len(window_vals)
-        # else: remains 0.0 (should not occur)
-    return pd.Series(result, index=series.index, dtype=np.float32)
+    result = np.full(n, np.nan, dtype=np.float32)
 
+    # ➕ PRE-FILTER VALID INDICES ONCE
+    valid_mask = ~np.isnan(values)
+    valid_indices = np.where(valid_mask)[0]
+    valid_values = values[valid_mask]
+
+    if len(valid_indices) == 0:
+        return pd.Series(result, index=series.index, dtype=np.float32)
+
+    # ➕ PROCESS ONLY VALID INDICES
+    for idx in valid_indices:
+        start = max(0, idx - window + 1)
+
+        # Find range of valid indices within [start, idx]
+        window_start_pos = np.searchsorted(valid_indices, start, side='left')
+        window_end_pos = np.searchsorted(valid_indices, idx, side='right')
+
+        window_valid_count = window_end_pos - window_start_pos
+
+        if window_valid_count == 0:
+            result[idx] = np.nan
+        else:
+            current_val = values[idx]
+            window_vals = valid_values[window_start_pos:window_end_pos]
+            rank_val = np.sum(window_vals <= current_val)
+            result[idx] = rank_val / window_valid_count
+
+    return pd.Series(result, index=series.index, dtype=np.float32)
 
 def _compute_candle_features(
     open_arr: np.ndarray,
@@ -134,11 +167,20 @@ def _compute_momentum(close: pd.Series) -> Dict[str, pd.Series]:
         - 'momentum_strength': rolling percentile rank of |momentum| (0.0–1.0)
     :note: Strength uses 50-bar lookback for adaptive scaling.
           Uses fast rolling percentile to avoid O(n²) performance trap.
+          Handles NaNs safely.
     """
     momentum_period = 14
-    roc = close.pct_change(periods=momentum_period) * 100
+    # ➕ Explicitly disable fill_method to avoid FutureWarning
+    roc = close.pct_change(periods=momentum_period, fill_method=None) * 100
     momentum_ema = roc.ewm(span=momentum_period, adjust=False).mean()
-    momentum_direction = np.sign(momentum_ema).astype(np.int8)
+
+    # ➕ Safe sign conversion: NaN stays NaN (as float), then cast with care
+    momentum_sign = np.sign(momentum_ema.values)
+    # Convert to int8, but keep NaN as NaN in a float32 series first
+    momentum_direction = pd.Series(
+        momentum_sign, index=close.index, dtype=np.float32
+    ).fillna(0.0).astype(np.int8)
+
     momentum_strength = _fast_rolling_percentile(momentum_ema.abs(), window=50)
     return {
         'momentum_ema': momentum_ema.astype(np.float32),
@@ -155,13 +197,28 @@ def _compute_volatility_regime(atr: pd.Series) -> Dict[str, pd.Series]:
         - 'volatility_regime': category ('low', 'normal', 'high')
         - 'vol_percentile': ATR rolling percentile (0.0–1.0)
     :note: Uses 50-bar lookback. Thresholds: low <33%, high >66%.
-          Uses fast rolling percentile for performance.
+          Handles zero-ATR case (all equal prices) by forcing 'low'.
     """
     vol_lookback = 50
-    vol_percentile = _fast_rolling_percentile(atr, window=vol_lookback)
-    vol_regime = pd.Series('normal', index=atr.index, dtype="category")
+
+    # Handle zero-ATR case
+    atol = 1e-10
+    if np.all(atr.values < atol):
+        vol_percentile = pd.Series(0.0, index=atr.index, dtype=np.float32)
+    else:
+        vol_percentile = _fast_rolling_percentile(atr, window=vol_lookback)
+
+    # Predefine categories
+    vol_regime = pd.Categorical(
+        ['normal'] * len(atr),
+        categories=['low', 'normal', 'high'],
+        ordered=False
+    )
+    vol_regime = pd.Series(vol_regime, index=atr.index)
+
     vol_regime[vol_percentile < 0.33] = 'low'
     vol_regime[vol_percentile > 0.66] = 'high'
+
     return {
         'volatility_regime': vol_regime,
         'vol_percentile': vol_percentile,
@@ -214,10 +271,33 @@ def _compute_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
     required_cols = {'open', 'high', 'low', 'close'}
     if not required_cols.issubset(df.columns):
         missing = required_cols - set(df.columns)
-        raise KeyError(f"_compute_metrics requires OHLC columns. Missing: {missing}")
+        raise KeyError(f"Missing required columns: {missing}")
 
     if df.empty:
-        return df.copy()
+        result = df.copy()
+        # ➕ Add all expected columns with empty values
+        result = result.assign(
+            body=0.0,
+            candle_range=0.0,
+            body_ratio=0.0,
+            close_location=0.5,
+            upper_wick=0.0,
+            lower_wick=0.0,
+            upper_wick_ratio=0.0,
+            lower_wick_ratio=0.0,
+            is_bullish_body=False,
+            is_bearish_body=False,
+            atr=0.001,
+            momentum_ema=0.0,
+            momentum_direction=0,
+            momentum_strength=0.0,
+            volatility_regime=pd.Categorical([],
+                                             categories=['low', 'normal', 'high']),
+            vol_percentile=0.0,
+            fractal_efficiency=0.0,
+            is_efficient=False
+        )
+        return result
 
     open_arr = df['open'].values
     high_arr = df['high'].values
