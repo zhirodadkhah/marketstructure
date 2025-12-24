@@ -257,6 +257,7 @@ class BarProcessor:
                     active_levels[key] = level
                     builder.set_signal(signal_map[role], bar_index)
 
+
     @staticmethod
     def _update_active_level(
             level: BreakLevel,
@@ -285,6 +286,11 @@ class BarProcessor:
         :param config: Configuration
         :param builder: Result builder
         :return: Tuple of (should_remove, failure_signal_name)
+
+        Update a single active break level with follow-through validation.
+
+        Note: Momentum continuation is still handled in the main loop.
+        Retests and confirmation now require LevelState.CONFIRMED.
         """
         if bar_index < level.break_idx:
             return False, None
@@ -295,14 +301,45 @@ class BarProcessor:
         if level.direction == 'bullish':
             level.max_post_break_high = max(level.max_post_break_high, high)
             level.moved_away_distance = level.max_post_break_high - level.price
-            prev_extreme = prev_high
         else:
             level.min_post_break_low = min(level.min_post_break_low, low)
             level.moved_away_distance = level.price - level.min_post_break_low
-            prev_extreme = prev_low
 
-        # Check immediate failure
-        if level.state == LevelState.BROKEN and bars_since_break <= 3:
+        # === FOLLOW-THROUGH VALIDATION ===
+        if level.state == LevelState.BROKEN:
+            # Initialize follow-through start for gap breaks
+            if level.follow_through_start is None:
+                level.follow_through_start = bar_index
+
+            ft_start = level.follow_through_start
+            ft_window_end = ft_start + config.follow_through_bars
+
+            if bar_index < ft_window_end:
+                # Count qualifying closes
+                qualifies = False
+                if level.direction == 'bullish':
+                    qualifies = close > level.price + level.buffer
+                else:
+                    qualifies = close < level.price - level.buffer
+                if qualifies:
+                    level.follow_through_progress += 1
+            else:
+                # Window ended — validate follow-through
+                required = int(np.ceil(config.follow_through_close_ratio * config.follow_through_bars))
+                if level.follow_through_progress >= required:
+                    level.state = LevelState.CONFIRMED
+                else:
+                    level.state = LevelState.FAILED_IMMEDIATE
+                    signal_name = (
+                        'is_bos_bullish_failed_follow_through'
+                        if level.direction == 'bullish' else
+                        'is_bos_bearish_failed_follow_through'
+                    )
+                    return True, signal_name
+
+        # === IMMEDIATE FAILURE (only during first 3 bars AND if still BROKEN) ===
+        if (level.state == LevelState.BROKEN and
+                bars_since_break <= 3):
             if level.direction == 'bullish' and close < level.price - level.buffer:
                 signal_name = 'is_failed_choch_bearish' if level.role == 'choch' else 'is_bullish_immediate_failure'
                 return True, signal_name
@@ -310,19 +347,15 @@ class BarProcessor:
                 signal_name = 'is_failed_choch_bullish' if level.role == 'choch' else 'is_bearish_immediate_failure'
                 return True, signal_name
 
-        # Check retest - note: momentum continuation is handled in main loop
-        if (level.state == LevelState.BROKEN and
+        # === RETEST PROCESSING (only on CONFIRMED levels) ===
+        if (level.state == LevelState.CONFIRMED and
                 config.pullback_min_bars <= bars_since_break <= config.pullback_max_bars):
-
             handler = RETEST_HANDLERS.get((level.role, level.direction))
             if handler:
                 if level.direction == 'bullish':
-                    # Pass prev_high as expected by bullish retest handlers
                     handler(level, high, low, close, prev_high, bar_index, config, builder)
                 else:
-                    # Pass prev_low as expected by bearish retest handlers
                     handler(level, high, low, close, prev_low, bar_index, config, builder)
-
                 if level.state in (LevelState.CONFIRMED, LevelState.FAILED_RETEST):
                     return True, None
 

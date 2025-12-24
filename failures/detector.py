@@ -87,7 +87,7 @@ def detect_structure_breaks(
 
         # Handle momentum (requires DataFrame slice — keep in main loop)
         for key, level in active_levels.items():
-            if (level.state == LevelState.BROKEN and level.role == 'bos' and
+            if (level.state == LevelState.CONFIRMED and level.role == 'bos' and
                 i - level.break_idx == config.momentum_continuation_bars):
                 never_pulled_back = True
                 if level.direction == 'bullish':
