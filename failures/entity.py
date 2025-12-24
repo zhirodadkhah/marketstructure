@@ -77,13 +77,14 @@ class BreakLevel:
 
         # Initialize extremes; gap breaks still track real price movement
         if is_gap_break:
-            self.moved_away_distance = 2.0 * atr_at_break
-            self.max_post_break_high = -np.inf
-            self.min_post_break_low = np.inf
+            self.moved_away_distance = config.min_break_atr_mult * atr_at_break
+
         else:
             self.moved_away_distance = 0.0
-            self.max_post_break_high = -np.inf
-            self.min_post_break_low = np.inf
+
+        # Keep extremes as -inf/inf for both cases
+        self.max_post_break_high = -np.inf
+        self.min_post_break_low = np.inf
 
 
 @dataclass
