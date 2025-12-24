@@ -257,7 +257,6 @@ class BarProcessor:
                     active_levels[key] = level
                     builder.set_signal(signal_map[role], bar_index)
 
-
     @staticmethod
     def _update_active_level(
             level: BreakLevel,
@@ -270,28 +269,9 @@ class BarProcessor:
             config: StructureBreakConfig,
             builder: ResultBuilder
     ) -> Tuple[bool, Optional[str]]:
-        """
-        Update a single active break level.
+        """Update a single active break level with follow-through validation."""
 
-        Note: Follows original pattern - momentum continuation is handled
-        in the main loop (requires dataframe slice).
-
-        :param level: Break level to update
-        :param bar_index: Current bar index
-        :param close: Close price
-        :param high: High price
-        :param low: Low price
-        :param prev_high: Previous bar's high (for bullish retests)
-        :param prev_low: Previous bar's low (for bearish retests)
-        :param config: Configuration
-        :param builder: Result builder
-        :return: Tuple of (should_remove, failure_signal_name)
-
-        Update a single active break level with follow-through validation.
-
-        Note: Momentum continuation is still handled in the main loop.
-        Retests and confirmation now require LevelState.CONFIRMED.
-        """
+        # Quick bounds check
         if bar_index < level.break_idx:
             return False, None
 
@@ -305,49 +285,76 @@ class BarProcessor:
             level.min_post_break_low = min(level.min_post_break_low, low)
             level.moved_away_distance = level.price - level.min_post_break_low
 
-        # === FOLLOW-THROUGH VALIDATION ===
+        # === 1. IMMEDIATE FAILURE (first 3 bars only) ===
+        if level.state == LevelState.BROKEN and bars_since_break <= 3:
+            immediate_failure = False
+            signal_name = None
+
+            if level.direction == 'bullish' and close < level.price - level.buffer:
+                immediate_failure = True
+                signal_name = 'is_failed_choch_bearish' if level.role == 'choch' else 'is_bullish_immediate_failure'
+            elif level.direction == 'bearish' and close > level.price + level.buffer:
+                immediate_failure = True
+                signal_name = 'is_failed_choch_bullish' if level.role == 'choch' else 'is_bearish_immediate_failure'
+
+            if immediate_failure:
+                return True, signal_name
+
+        # === 2. FOLLOW-THROUGH VALIDATION ===
         if level.state == LevelState.BROKEN:
-            # Initialize follow-through start for gap breaks
-            if level.follow_through_start is None:
-                level.follow_through_start = bar_index
+            # Optional: Handle zero follow-through bars (immediate confirmation)
+            if config.follow_through_bars <= 0:
+                level.state = LevelState.CONFIRMED
+                return False, None
 
-            ft_start = level.follow_through_start
-            ft_window_end = ft_start + config.follow_through_bars
+            # ✅ FIXED: Correct window boundaries for N bars
+            # Determine window start (gap breaks skip the gap bar)
+            if level.is_gap_break:
+                window_start = level.break_idx + 1
+            else:
+                window_start = level.break_idx
 
-            if bar_index < ft_window_end:
+            # Window end: start + N - 1 (for N bars total)
+            window_end = window_start + config.follow_through_bars - 1
+
+            # Check if we're inside the follow-through window
+            if window_start <= bar_index <= window_end:
                 # Count qualifying closes
                 qualifies = False
                 if level.direction == 'bullish':
                     qualifies = close > level.price + level.buffer
                 else:
                     qualifies = close < level.price - level.buffer
+
                 if qualifies:
                     level.follow_through_progress += 1
-            else:
-                # Window ended — validate follow-through
-                required = int(np.ceil(config.follow_through_close_ratio * config.follow_through_bars))
-                if level.follow_through_progress >= required:
-                    level.state = LevelState.CONFIRMED
-                else:
-                    level.state = LevelState.FAILED_IMMEDIATE
-                    signal_name = (
-                        'is_bos_bullish_failed_follow_through'
-                        if level.direction == 'bullish' else
-                        'is_bos_bearish_failed_follow_through'
-                    )
-                    return True, signal_name
 
-        # === IMMEDIATE FAILURE (only during first 3 bars AND if still BROKEN) ===
-        if (level.state == LevelState.BROKEN and
-                bars_since_break <= 3):
-            if level.direction == 'bullish' and close < level.price - level.buffer:
-                signal_name = 'is_failed_choch_bearish' if level.role == 'choch' else 'is_bullish_immediate_failure'
-                return True, signal_name
-            elif level.direction == 'bearish' and close > level.price + level.buffer:
-                signal_name = 'is_failed_choch_bullish' if level.role == 'choch' else 'is_bearish_immediate_failure'
-                return True, signal_name
+                # Validate on the last bar of the window
+                if bar_index == window_end:
+                    # Calculate required qualifying closes
+                    required = int(np.ceil(config.follow_through_close_ratio * config.follow_through_bars))
 
-        # === RETEST PROCESSING (only on CONFIRMED levels) ===
+                    # Ensure at least 1 qualifying close (quality floor)
+                    min_required = max(1, required)
+
+                    if level.follow_through_progress >= min_required:
+                        level.state = LevelState.CONFIRMED
+                        # Debug logging (optional)
+                        if __debug__:
+                            print(f"[FT] Level {level.price:.4f} CONFIRMED: "
+                                  f"{level.follow_through_progress}/{required} closes")
+                    else:
+                        level.state = LevelState.FAILED_IMMEDIATE
+                        signal_name = ('is_bos_bullish_failed_follow_through'
+                                       if level.direction == 'bullish' else
+                                       'is_bos_bearish_failed_follow_through')
+                        # Debug logging (optional)
+                        if __debug__:
+                            print(f"[FT] Level {level.price:.4f} FAILED: "
+                                  f"{level.follow_through_progress}/{required} closes")
+                        return True, signal_name
+
+        # === 3. RETEST PROCESSING (CONFIRMED levels only) ===
         if (level.state == LevelState.CONFIRMED and
                 config.pullback_min_bars <= bars_since_break <= config.pullback_max_bars):
             handler = RETEST_HANDLERS.get((level.role, level.direction))
@@ -360,6 +367,7 @@ class BarProcessor:
                     return True, None
 
         return False, None
+
 
     @staticmethod
     def _cleanup_active_levels(
