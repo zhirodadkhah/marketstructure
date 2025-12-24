@@ -1,6 +1,7 @@
 
 from enum import IntEnum
 from typing import Optional
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from structure.failures.config import StructureBreakConfig
@@ -33,7 +34,7 @@ class ResultBuilder:
             result[col] = arr
         return result
     
-
+@dataclass
 class LevelState(IntEnum):
     BROKEN = 0
     CONFIRMED = 1
@@ -83,3 +84,13 @@ class BreakLevel:
             self.moved_away_distance = 0.0
             self.max_post_break_high = -np.inf
             self.min_post_break_low = np.inf
+
+
+@dataclass
+class BreakTarget:
+    """Represents a potential break target."""
+    role: str  # 'bos_bull', 'bos_bear', 'choch_bear', 'choch_bull'
+    direction: str  # 'bullish' or 'bearish'
+    price: float
+    idx: int
+    is_valid: bool = True

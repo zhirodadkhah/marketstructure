@@ -6,40 +6,96 @@ from structure.failures.config import StructureBreakConfig
 from structure.failures.entity import BreakLevel, ResultBuilder, LevelState
 
 
-def _compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
+def _compute_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
     """
     Compute derived price metrics from OHLC data for structure break detection.
 
+    Derived metrics include candle body characteristics, wick analysis,
+    and volatility measures.
+
     :param df: Input DataFrame containing 'open', 'high', 'low', 'close' columns.
+    :param atr_period: Period for Average True Range calculation (default: 14)
     :return: A copy of `df` with added columns:
-        - 'body': close - open
-        - 'candle_range': high - low
-        - 'body_ratio': |body| / candle_range (0.0 if range near zero)
-        - 'is_bullish_body': close > open
-        - 'is_bearish_body': close < open
-        - 'atr': 14-period Average True Range, backfilled and floored at 0.001
+        - Basic candle metrics:
+            * 'body': close - open
+            * 'candle_range': high - low
+            * 'body_ratio': |body| / candle_range (0.0 if range near zero)
+            * 'is_bullish_body': close > open
+            * 'is_bearish_body': close < open
+        - Candle wick analysis:
+            * 'close_location': Relative position of close within candle range
+                              (0 = bottom, 1 = top, 0.5 = neutral default)
+            * 'upper_wick': Absolute size of upper wick
+            * 'lower_wick': Absolute size of lower wick
+            * 'upper_wick_ratio': Upper wick as proportion of candle range
+            * 'lower_wick_ratio': Lower wick as proportion of candle range
+        - Volatility:
+            * 'atr': {atr_period}-period Average True Range, backfilled and floored at 0.001
     :note: Does not modify the original DataFrame.
     """
     df = df.copy()
-    df['body'] = df['close'] - df['open']
-    df['candle_range'] = df['high'] - df['low']
-    df['body_ratio'] = np.where(
-        df['candle_range'] > 1e-10,
-        np.abs(df['body']) / df['candle_range'],
-        0.0
-    )
-    df['is_bullish_body'] = df['close'] > df['open']
-    df['is_bearish_body'] = df['close'] < df['open']
 
-    tr = np.maximum(
-        df['high'] - df['low'],
-        np.abs(df['high'] - df['close'].shift(1)),
-        np.abs(df['low'] - df['close'].shift(1))
+    # Pre-compute frequently used values
+    open_arr = df['open'].values
+    high_arr = df['high'].values
+    low_arr = df['low'].values
+    close_arr = df['close'].values
+
+    # Basic metrics
+    body = close_arr - open_arr
+    candle_range = high_arr - low_arr
+
+    # Avoid repeated np.where calls
+    safe_range_mask = candle_range > 1e-10
+    safe_range = np.where(safe_range_mask, candle_range, 1.0)  # Avoid division by zero
+
+    # Body ratio
+    body_ratio = np.abs(body) / safe_range
+    body_ratio = np.where(safe_range_mask, body_ratio, 0.0)
+
+    # Close location
+    close_location = np.where(
+        safe_range_mask,
+        (close_arr - low_arr) / safe_range,
+        0.5
     )
-    df['atr'] = tr.rolling(window=14, min_periods=1).mean()
+
+    # Wick calculations
+    max_oc = np.maximum(open_arr, close_arr)
+    min_oc = np.minimum(open_arr, close_arr)
+
+    upper_wick = high_arr - max_oc
+    lower_wick = min_oc - low_arr
+
+    upper_wick_ratio = upper_wick / safe_range
+    lower_wick_ratio = lower_wick / safe_range
+    upper_wick_ratio = np.where(safe_range_mask, upper_wick_ratio, 0.0)
+    lower_wick_ratio = np.where(safe_range_mask, lower_wick_ratio, 0.0)
+
+    # Assign all at once
+    df = df.assign(
+        body=body,
+        candle_range=candle_range,
+        is_bullish_body=close_arr > open_arr,
+        is_bearish_body=close_arr < open_arr,
+        body_ratio=body_ratio,
+        close_location=close_location,
+        upper_wick=upper_wick,
+        lower_wick=lower_wick,
+        upper_wick_ratio=upper_wick_ratio,
+        lower_wick_ratio=lower_wick_ratio
+    )
+
+    # ATR calculation (unchanged, as rolling is the bottleneck)
+    tr0 = df['high'] - df['low']
+    tr1 = np.abs(df['high'] - df['close'].shift(1))
+    tr2 = np.abs(df['low'] - df['close'].shift(1))
+    tr = np.maximum.reduce([tr0, tr1, tr2])
+
+    df['atr'] = tr.rolling(window=atr_period, min_periods=1).mean()
     df['atr'] = df['atr'].fillna(method='bfill').fillna(0.001)
-    return df
 
+    return df
 
 def _track_swing_sequences(df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
     """
