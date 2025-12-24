@@ -13,7 +13,9 @@ SIGNAL_COLS = [
     'is_choch_bullish', 'is_choch_bearish',
     'is_failed_choch_bullish', 'is_failed_choch_bearish',
     'is_bullish_break_failure', 'is_bearish_break_failure',
-    'is_bullish_immediate_failure', 'is_bearish_immediate_failure'
+    'is_bullish_immediate_failure', 'is_bearish_immediate_failure',
+    'is_bos_bullish_failed_follow_through',
+    'is_bos_bearish_failed_follow_through'
 ]
 
 
@@ -41,6 +43,7 @@ class LevelState(IntEnum):
     FAILED_IMMEDIATE = 2
     FAILED_RETEST = 3
     MOMENTUM = 4
+    FOLLOW_THROUGH_PENDING = 5  # waiting for confirmation
 
 
 class BreakLevel:
@@ -48,7 +51,8 @@ class BreakLevel:
         'swing_idx', 'price', 'direction', 'role', 'break_idx', 'atr_at_break',
         'is_gap_break', 'max_post_break_high', 'min_post_break_low',
         'retest_active', 'retest_start_idx', 'state', 'buffer',
-        'moved_away_distance', 'retest_attempts'
+        'moved_away_distance', 'retest_attempts', 'follow_through_start',
+        'follow_through_progress'
     )
 
     def __init__(
@@ -74,6 +78,8 @@ class BreakLevel:
         self.retest_start_idx: Optional[int] = None
         self.state = LevelState.BROKEN
         self.retest_attempts = 0
+        self.follow_through_start = break_idx if not is_gap_break else None
+        self.follow_through_progress = 0  # count of qualifying closes
 
         # Initialize extremes; gap breaks still track real price movement
         if is_gap_break:

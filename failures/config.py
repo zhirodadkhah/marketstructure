@@ -14,4 +14,6 @@ class StructureBreakConfig:
     momentum_threshold: float = 1.5
     wick_body_ratio: float = 2.0
     upper_wick_ratio: float = 0.3
+    follow_through_bars: int = 3
+    follow_through_close_ratio: float = 0.6
 
