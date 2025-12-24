@@ -6,7 +6,8 @@ from collections import defaultdict
 from structure.failures.bar import BarProcessor
 from structure.failures.config import StructureBreakConfig
 from structure.failures.entity import BreakLevel, ResultBuilder, LevelState, SIGNAL_COLS
-from structure.failures.retests import _compute_metrics, _track_swing_sequences
+from structure.failures.retests import _track_swing_sequences
+from structure.failures.calcs import _compute_metrics
 
 
 def detect_structure_breaks(
