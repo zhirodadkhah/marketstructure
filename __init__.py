@@ -3,6 +3,7 @@
 
 from .failures.config import StructureBreakConfig
 from .failures.detector import detect_structure_breaks
+from .failures.mtf_detector import detect_mtf_structure_breaks
 from .swings import detect_swing_points, detect_market_structure
 from .trends import detect_trend_state
 from .failures.regime import detect_market_regime
@@ -20,5 +21,6 @@ __all__ = [
     'tag_sessions',
     'add_liquidity_awareness',
     'RegimeSignalFilter',
-    'detect_support_resistance_zones'
+    'detect_support_resistance_zones',
+    'detect_mtf_structure_breaks'
 ]

@@ -1,5 +1,6 @@
 # config.py
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 
 @dataclass(frozen=True)
@@ -56,3 +57,8 @@ class StructureBreakConfig:
     zone_buffer_multiplier: float = 0.5
     zone_active_window: int = 50
     max_zones: int = 100
+
+    # --- GROUP 3: MTF CONFIG ---
+    mtf_enabled: bool = False
+    mtf_periods: List[str] = field(default_factory=lambda: ['1H'])
+    mtf_min_confluence_score: float = 0.6
