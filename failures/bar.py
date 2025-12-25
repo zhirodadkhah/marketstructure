@@ -288,9 +288,11 @@ class BarProcessor:
     def _update_active_level(
             level: BreakLevel,
             bar_index: int,
+            open_price: float,
             close: float,
             high: float,
             low: float,
+            atr_val: float,
             prev_high: Optional[float],
             prev_low: Optional[float],
             config: StructureBreakConfig,
@@ -387,9 +389,10 @@ class BarProcessor:
             handler = RETEST_HANDLERS.get((level.role, level.direction))
             if handler:
                 if level.direction == 'bullish':
-                    handler(level, high, low, close, prev_high, bar_index, config, builder)
+                    handler(level, high, low, close, open_price, prev_high, bar_index, config, builder, atr_val)
                 else:
-                    handler(level, high, low, close, prev_low, bar_index, config, builder)
+                    handler(level, high, low, close, open_price, prev_low, bar_index, config, builder, atr_val)
+
                 if level.state in (LevelState.CONFIRMED, LevelState.FAILED_RETEST):
                     return True, None
 
@@ -459,8 +462,8 @@ class BarProcessor:
         keys_to_remove = set()
         for key, level in active_levels.items():
             should_remove, failure_signal = BarProcessor._update_active_level(
-                level=level, bar_index=bar_index, close=close, high=high, low=low,
-                prev_high=prev_high, prev_low=prev_low, config=config, builder=builder
+                level=level, bar_index=bar_index, open_price=open_price ,close=close, high=high, low=low,
+                prev_high=prev_high, prev_low=prev_low, config=config, builder=builder, atr_val=atr_val
             )
             if should_remove:
                 keys_to_remove.add(key)

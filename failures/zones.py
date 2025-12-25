@@ -1,5 +1,5 @@
 # zones.py
-from typing import Tuple, Dict
+from typing import Tuple
 import pandas as pd
 import numpy as np
 from collections import defaultdict

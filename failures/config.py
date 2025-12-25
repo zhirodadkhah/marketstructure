@@ -75,3 +75,12 @@ class StructureBreakConfig:
     range_compression_threshold: float = 0.7
     squeeze_threshold: float = 0.5
     volatility_regime_window: int = 50
+
+    # --- GROUP 5: TEMPORAL & VELOCITY CONFIG ---
+    pullback_min_bars: int = 3  # Minimum bars before valid retest
+    pullback_max_bars: int = 50  # Maximum bars to consider retest
+    max_pullback_velocity: float = 0.8  # Max 0.8 ATR per bar for valid retest
+    min_retest_respect_bars: int = 5  # Ideal minimum bars for "respectful" retest
+    fast_retest_penalty: float = 0.7  # Quality multiplier for fast retests
+    slow_retest_boost: float = 1.2  # Quality multiplier for slow retests
+    velocity_smoothing_period: int = 3  # Bars for velocity smoothing

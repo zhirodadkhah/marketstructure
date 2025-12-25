@@ -48,6 +48,7 @@ class LevelState(IntEnum):
 
 # In entity.py, update the BreakLevel class:
 
+# In entity.py, replace the BreakLevel class with:
 class BreakLevel:
     __slots__ = (
         'swing_idx', 'price', 'direction', 'role', 'break_idx', 'atr_at_break',
@@ -57,7 +58,12 @@ class BreakLevel:
         'follow_through_progress',
         # ➕ ZONE CONTEXT
         'zone_strength', 'retest_quality', 'is_confluence_zone',
-        'retest_count', 'signal_zone_score'
+        'retest_count', 'signal_zone_score',
+        # ➕ GROUP 5: Temporal & Velocity slots
+        'retest_velocity', 'bars_to_retest', 'pullback_distance',
+        'retest_start_bar', 'retest_end_bar', 'retest_duration',
+        'velocity_smoothed', 'is_fast_retest', 'is_slow_retest',
+        'retest_quality_score'
     )
 
     def __init__(
@@ -91,21 +97,29 @@ class BreakLevel:
         self.retest_attempts = 0
         self.follow_through_start = break_idx if not is_gap_break else None
         self.follow_through_progress = 0
-
         # ➕ ZONE CONTEXT
         self.zone_strength = zone_strength
         self.retest_quality = retest_quality
         self.is_confluence_zone = is_confluence_zone
         self.retest_count = retest_count
         self.signal_zone_score = signal_zone_score
-
         if is_gap_break:
             self.moved_away_distance = config.min_break_atr_mult * atr_at_break
         else:
             self.moved_away_distance = 0.0
-
         self.max_post_break_high = -np.inf
         self.min_post_break_low = np.inf
+        # ➕ GROUP 5: Temporal & Velocity
+        self.retest_velocity = 0.0
+        self.bars_to_retest = 0
+        self.pullback_distance = 0.0
+        self.retest_start_bar = None
+        self.retest_end_bar = None
+        self.retest_duration = 0
+        self.velocity_smoothed = 0.0
+        self.is_fast_retest = False
+        self.is_slow_retest = False
+        self.retest_quality_score = 0.0
 
 @dataclass
 class BreakTarget:

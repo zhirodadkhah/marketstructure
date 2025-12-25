@@ -66,7 +66,10 @@ def detect_mtf_structure_breaks(
                 continue
 
             # 2. Run full pipeline on HTF
-            df_htf_analysis = run_full_pipeline_on_htf(df_htf, config)
+            df_htf_analysis = run_full_pipeline_on_htf(
+                df_htf, config,
+                detect_structure_breaks  # 👈 pass it explicitly
+            )
 
             # 3. Align to LTF
             df_htf_aligned = align_htf_signals_to_ltf(df_htf_analysis, df_ltf.index)
@@ -197,7 +200,6 @@ def get_mtf_summary(df: pd.DataFrame) -> Dict:
 
     if 'is_bos_bearish_initial' in df.columns:
         bearish_confluence = df[df['is_bos_bearish_initial']]['mtf_confluence_score'].mean()
-        summary['bearish_signals_avg_confluence'] = float(bearish_confluence) if not pd.isna(
-            bearish_confluence) else 0.0
+        summary['bearish_signals_avg_confluence'] = float(bearish_confluence) if not pd.isna(bearish_confluence) else 0.0
 
     return summary

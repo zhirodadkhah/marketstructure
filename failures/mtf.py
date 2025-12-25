@@ -2,7 +2,7 @@
 """Multi-timeframe (MTF) context for structure break detection."""
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Callable
 from structure.failures.config import StructureBreakConfig
 
 
@@ -37,7 +37,8 @@ def resample_ohlc_to_htf(df_ltf: pd.DataFrame, htf_rule: str) -> pd.DataFrame:
 
 def run_full_pipeline_on_htf(
         df_htf: pd.DataFrame,
-        config: StructureBreakConfig
+        config: StructureBreakConfig,
+        detector_func: Callable
 ) -> pd.DataFrame:
     """
     Run full detection pipeline on a single HTF.
@@ -76,8 +77,7 @@ def run_full_pipeline_on_htf(
         **{k: v for k, v in config.__dict__.items() if not k.startswith('mtf_')},
         mtf_enabled=False  # Disable MTF for HTF analysis
     )
-    df_result = detect_structure_breaks(df_result, config_no_mtf)
-
+    df_result = detector_func(df_result, config_no_mtf)
     return df_result
 
 
