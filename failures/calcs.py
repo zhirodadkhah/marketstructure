@@ -319,3 +319,22 @@ def _compute_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
         **eff_features
     )
     return result
+
+
+# Add to structure/failures/calcs.py (at the end of the file)
+
+def compute_all_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
+    """
+    Compute all metrics for structure break detection.
+
+    This is a convenience wrapper that ensures all required metrics
+    are computed for the detector.
+
+    Args:
+        df: Input DataFrame with OHLC data
+        atr_period: Period for ATR calculation
+
+    Returns:
+        DataFrame with all metrics
+    """
+    return _compute_metrics(df, atr_period)

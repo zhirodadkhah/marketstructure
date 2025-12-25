@@ -1,25 +1,32 @@
-# detector.py
-from typing import Optional, Dict, Tuple, List, DefaultDict
-import numpy as np
+from typing import Optional, Dict, DefaultDict, Tuple, List
 import pandas as pd
+import numpy as np
 from collections import defaultdict
+
 from structure.failures.bar import BarProcessor
 from structure.failures.config import StructureBreakConfig
 from structure.failures.entity import BreakLevel, ResultBuilder, LevelState, SIGNAL_COLS
 from structure.failures.retests import _track_swing_sequences
 from structure.failures.calcs import _compute_metrics
 
+# ➕ New imports for regime detection
+from structure.failures.regime import detect_market_regime
+from structure.failures.market_hours import tag_sessions, add_liquidity_awareness
+
 
 def detect_structure_breaks(
-    df: pd.DataFrame,
-    config: Optional[StructureBreakConfig] = None
+        df: pd.DataFrame,
+        config: Optional[StructureBreakConfig] = None
 ) -> pd.DataFrame:
     """
-    Detect institutional-grade structure breaks (BOS, CHOCH) and failures using pure price action.
+    Detect structure breaks with market regime and context awareness.
 
-    :param df: DataFrame with OHLC, swing points, market structure, and trend state.
-    :param config: Optional configuration (uses defaults if None).
-    :return: DataFrame with boolean signal columns for all structure events.
+    Args:
+        df: DataFrame with OHLC, swing points, market structure, and trend state.
+        config: Optional configuration (uses defaults if None).
+
+    Returns:
+        DataFrame with boolean signal columns and context columns.
     """
     if config is None:
         config = StructureBreakConfig()
@@ -42,11 +49,57 @@ def detect_structure_breaks(
     # Setup
     df_calc = df.reset_index(drop=True)
     original_index = df.index.copy()
-    df_calc = _compute_metrics(df_calc)
+
+    # Use ATR period from config
+    df_calc = _compute_metrics(df_calc, atr_period=config.atr_period)
+
     builder = ResultBuilder(len(df_calc))
     swings = _track_swing_sequences(df_calc)
 
-    # ➕ PRE-EXTRACT ALL COLUMNS AS NUMPY ARRAYS (NO .iloc in loop)
+    # ➕ MARKET REGIME DETECTION
+    if config.enable_regime_detection:
+        try:
+            regime_config = {
+                'swing_density_high': config.regime_swing_density_high,
+                'swing_density_moderate': config.regime_swing_density_moderate,
+                'swing_density_low': config.regime_swing_density_low,
+                'efficiency_high': config.regime_efficiency_high,
+                'efficiency_low': config.regime_efficiency_low,
+                'consistency_high': config.regime_consistency_high,
+                'atr_slope_threshold': config.regime_atr_slope_threshold,
+            }
+            df_calc['market_regime'] = detect_market_regime(
+                df_calc,
+                swing_window=config.regime_swing_window,
+                atr_slope_window=config.regime_atr_slope_window,
+                consistency_window=config.regime_consistency_window,
+                config=regime_config
+            )
+        except Exception as e:
+            df_calc['market_regime'] = pd.Series('neutral', index=df_calc.index, dtype="category")
+
+    # ➕ SESSION TAGGING
+    if config.enable_session_tagging and isinstance(original_index, pd.DatetimeIndex):
+        try:
+            session_config = {
+                'asia_start': config.session_asia_start,
+                'asia_end': config.session_asia_end,
+                'london_start': config.session_london_start,
+                'london_end': config.session_london_end,
+                'ny_start': config.session_ny_start,
+                'ny_end': config.session_ny_end,
+                'london_ny_overlap_start': config.session_london_ny_overlap_start,
+                'london_ny_overlap_end': config.session_london_ny_overlap_end,
+                'timezone': config.session_timezone
+            }
+            df_calc['session'] = tag_sessions(df_calc, config=session_config)
+            df_calc = add_liquidity_awareness(df_calc, session_col='session')
+        except Exception as e:
+            df_calc['session'] = pd.Series('unknown', index=df_calc.index)
+            df_calc['liquidity_score'] = 0.5
+            df_calc['is_high_liquidity'] = False
+
+    # ➕ PRE-EXTRACT ALL COLUMNS AS NUMPY ARRAYS
     n = len(df_calc)
     close_arr = df_calc['close'].values
     high_arr = df_calc['high'].values
@@ -63,12 +116,10 @@ def detect_structure_breaks(
 
     # ➕ MOMENTUM SCHEDULING QUEUE
     momentum_queue: DefaultDict[int, List[BreakLevel]] = defaultdict(list)
-
     active_levels: Dict[Tuple[str, int], BreakLevel] = {}
 
-    # Main loop — now fully vector-access optimized
+    # Main loop
     for i in range(n):
-        # Fetch scalar values
         close = close_arr[i]
         high = high_arr[i]
         low = low_arr[i]
@@ -85,7 +136,6 @@ def detect_structure_breaks(
         prev_high = high_arr[i - 1] if i > 0 else None
         prev_low = low_arr[i - 1] if i > 0 else None
 
-        # Process breaks and retests
         BarProcessor.process_bar_vectorized(
             bar_index=i,
             close=close,
@@ -106,10 +156,9 @@ def detect_structure_breaks(
             close_location=close_location,
             upper_wick_ratio=upper_wick_ratio,
             lower_wick_ratio=lower_wick_ratio,
-            momentum_queue=momentum_queue  # ➕ pass queue to schedule momentum
+            momentum_queue=momentum_queue
         )
 
-        # ➕ Process scheduled momentum checks
         if i in momentum_queue:
             for level in momentum_queue[i]:
                 if level.state == LevelState.CONFIRMED and level.role == 'bos':
@@ -125,6 +174,8 @@ def detect_structure_breaks(
                         builder.set_signal(col, level.break_idx)
                         level.state = LevelState.MOMENTUM
 
-    result = builder.build(df)
+    # Build result
+    result = builder.build(df_calc)
     result.index = original_index
+
     return result

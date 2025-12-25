@@ -1,4 +1,3 @@
-# structure/failures/config.py
 from dataclasses import dataclass
 
 
