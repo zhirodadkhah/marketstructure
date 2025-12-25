@@ -62,3 +62,16 @@ class StructureBreakConfig:
     mtf_enabled: bool = False
     mtf_periods: List[str] = field(default_factory=lambda: ['1H'])
     mtf_min_confluence_score: float = 0.6
+
+    # --- GROUP 4: ADVANCED PRICE BEHAVIOR CONFIG ---
+    enable_advanced_metrics: bool = True
+    momentum_period: int = 1
+    acceleration_period: int = 1
+    normalize_momentum_by_atr: bool = True
+    smooth_momentum: bool = False
+    momentum_smoothing_period: int = 3
+    range_window: int = 20
+    range_expansion_threshold: float = 1.5
+    range_compression_threshold: float = 0.7
+    squeeze_threshold: float = 0.5
+    volatility_regime_window: int = 50

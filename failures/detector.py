@@ -52,7 +52,27 @@ def detect_structure_breaks(
     original_index = df.index.copy()
 
     # Use ATR period from config
-    df_calc = _compute_metrics(df_calc, atr_period=config.atr_period)
+    momentum_config = {
+        'momentum_period': config.momentum_period,
+        'acceleration_period': config.acceleration_period,
+        'normalize_by_atr': config.normalize_momentum_by_atr,
+        'smooth_momentum': config.smooth_momentum,
+        'smoothing_period': config.momentum_smoothing_period,
+    }
+
+    range_config = {
+        'range_window': config.range_window,
+        'expansion_threshold': config.range_expansion_threshold,
+        'compression_threshold': config.range_compression_threshold,
+        'squeeze_threshold': config.squeeze_threshold,
+        'volatility_regime_window': config.volatility_regime_window,
+    }
+
+    if config.enable_advanced_metrics:
+        df_calc = _compute_metrics(df_calc, atr_period=config.atr_period,
+                                   momentum_config=momentum_config, range_config=range_config)
+    else:
+        df_calc = _compute_metrics(df_calc, atr_period=config.atr_period)
 
     builder = ResultBuilder(len(df_calc))
     swings = _track_swing_sequences(df_calc)

@@ -1,239 +1,270 @@
-from typing import Dict
+# structure/failures/calcs.py
+from typing import Dict, Optional
 import pandas as pd
 import numpy as np
 
 
-def _fast_rolling_percentile(series: pd.Series, window: int) -> pd.Series:
+def _compute_momentum_metrics(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.DataFrame:
     """
-    Compute fast rolling percentile rank without O(n²) complexity.
-    :param series: Input numeric series.
-    :param window: Rolling window size (must be > 0).
-    :return: Series with values in [0.0, 1.0] representing percentile rank.
-        NaN values are preserved in the output.
-    :note: For each bar i, computes rank of series[i] within series[i-window+1:i+1].
-    Uses optimized indexing to avoid redundant NaN checks.
-    Handles edge cases:
-        - window = 1 → always returns 1.0 for non-NaN values (correct)
-        - all-equal values → returns 1.0
-        - NaN in current or window → returns NaN
-    Complexity: O(n · k) where k = average number of valid values per window.
+    Compute momentum, acceleration, and normalized versions.
+
+    Args:
+        df: DataFrame with 'close' and 'atr' columns
+        config: Optional configuration dict
+
+    Returns:
+        DataFrame with momentum columns added
     """
-    if len(series) == 0:
-        return pd.Series([], dtype=np.float32, index=series.index)
+    df = df.copy()
 
-    if window <= 0:
-        raise ValueError(f"Window must be > 0, got {window}")
-
-    # ➕ EARLY EXIT: window = 1 → always 1.0 for valid values
-    if window == 1:
-        result = np.where(~np.isnan(series.values), 1.0, np.nan)
-        return pd.Series(result, index=series.index, dtype=np.float32)
-
-    values = series.values
-    n = len(values)
-    result = np.full(n, np.nan, dtype=np.float32)
-
-    # ➕ PRE-FILTER VALID INDICES ONCE
-    valid_mask = ~np.isnan(values)
-    valid_indices = np.where(valid_mask)[0]
-    valid_values = values[valid_mask]
-
-    if len(valid_indices) == 0:
-        return pd.Series(result, index=series.index, dtype=np.float32)
-
-    # ➕ PROCESS ONLY VALID INDICES
-    for idx in valid_indices:
-        start = max(0, idx - window + 1)
-
-        # Find range of valid indices within [start, idx]
-        window_start_pos = np.searchsorted(valid_indices, start, side='left')
-        window_end_pos = np.searchsorted(valid_indices, idx, side='right')
-
-        window_valid_count = window_end_pos - window_start_pos
-
-        if window_valid_count == 0:
-            result[idx] = np.nan
-        else:
-            current_val = values[idx]
-            window_vals = valid_values[window_start_pos:window_end_pos]
-            rank_val = np.sum(window_vals <= current_val)
-            result[idx] = rank_val / window_valid_count
-
-    return pd.Series(result, index=series.index, dtype=np.float32)
-
-def _compute_candle_features(
-    open_arr: np.ndarray,
-    high_arr: np.ndarray,
-    low_arr: np.ndarray,
-    close_arr: np.ndarray
-) -> Dict[str, np.ndarray]:
-    """
-    Compute candlestick-derived metrics from OHLC price arrays.
-    :param open_arr: Array of open prices.
-    :param high_arr: Array of high prices.
-    :param low_arr: Array of low prices.
-    :param close_arr: Array of close prices.
-    :return: Dictionary of NumPy arrays for:
-        - 'body': close - open
-        - 'candle_range': high - low
-        - 'body_ratio': |body| / range (0.0 if range near zero)
-        - 'is_bullish_body': close > open
-        - 'is_bearish_body': close < open
-        - 'close_location': (close - low) / range (0.5 if flat)
-        - 'upper_wick', 'lower_wick': absolute wick sizes
-        - 'upper_wick_ratio', 'lower_wick_ratio': wicks as % of range
-    :note: All outputs are same length as inputs. Division-by-zero is safely guarded.
-          Arrays are cast to float32 for memory efficiency.
-    """
-    # Cast to float32 early for memory savings
-    open_arr = open_arr.astype(np.float32)
-    high_arr = high_arr.astype(np.float32)
-    low_arr = low_arr.astype(np.float32)
-    close_arr = close_arr.astype(np.float32)
-
-    body = close_arr - open_arr
-    candle_range = high_arr - low_arr
-    safe_range_mask = candle_range > 1e-10
-    safe_range = np.where(safe_range_mask, candle_range, 1.0)
-
-    body_ratio = np.abs(body) / safe_range
-    body_ratio = np.where(safe_range_mask, body_ratio, 0.0)
-
-    close_location = np.where(safe_range_mask, (close_arr - low_arr) / safe_range, 0.5)
-
-    max_oc = np.maximum(open_arr, close_arr)
-    min_oc = np.minimum(open_arr, close_arr)
-    upper_wick = high_arr - max_oc
-    lower_wick = min_oc - low_arr
-
-    upper_wick_ratio = np.where(safe_range_mask, upper_wick / safe_range, 0.0)
-    lower_wick_ratio = np.where(safe_range_mask, lower_wick / safe_range, 0.0)
-
-    is_bullish_body = close_arr > open_arr
-    is_bearish_body = close_arr < open_arr
-
-    return {
-        'body': body,
-        'candle_range': candle_range,
-        'body_ratio': body_ratio,
-        'close_location': close_location,
-        'upper_wick': upper_wick,
-        'lower_wick': lower_wick,
-        'upper_wick_ratio': upper_wick_ratio,
-        'lower_wick_ratio': lower_wick_ratio,
-        'is_bullish_body': is_bullish_body,
-        'is_bearish_body': is_bearish_body,
+    # Default configuration
+    default_config = {
+        'momentum_period': 1,  # Bar-over-bar momentum
+        'acceleration_period': 1,  # Change in momentum
+        'normalize_by_atr': True,
+        'smooth_momentum': False,
+        'smoothing_period': 3,
     }
 
+    cfg = {**default_config, **(config or {})}
 
-def _compute_atr(
-    high: pd.Series,
-    low: pd.Series,
-    close: pd.Series,
-    period: int
-) -> pd.Series:
-    """
-    Compute Average True Range (ATR) using standard Wilder's method.
-    :param high: High prices.
-    :param low: Low prices.
-    :param close: Close prices.
-    :param period: ATR lookback window.
-    :return: ATR series, backfilled and floored at 0.001.
-    :note: Uses simple moving average (not EMA) for consistency with original.
-    """
-    if not all(isinstance(s, pd.Series) for s in [high, low, close]):
-        raise TypeError("ATR inputs must be pandas Series")
-    if period < 1:
-        raise ValueError(f"ATR period must be ≥ 1, got {period}")
-    if not (len(high) == len(low) == len(close)):
-        raise ValueError("High, low, close must have equal length")
+    close = df['close'].values.astype(np.float32)
+    atr = df['atr'].values.astype(np.float32)
+    n = len(df)
 
-    tr0 = high - low
-    tr1 = (high - close.shift(1)).abs()
-    tr2 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr0, tr1, tr2], axis=1).max(axis=1)
-    atr = tr.rolling(window=period, min_periods=1).mean()
-    atr = atr.bfill().fillna(0.001)
-    return atr.astype(np.float32)
-
-
-def _compute_momentum(close: pd.Series) -> Dict[str, pd.Series]:
-    """
-    Compute directional momentum features from price series.
-    :param close: Close price series.
-    :return: Dictionary with:
-        - 'momentum_ema': EMA-smoothed % rate of change (14-bar)
-        - 'momentum_direction': +1 (up), -1 (down), 0
-        - 'momentum_strength': rolling percentile rank of |momentum| (0.0–1.0)
-    :note: Strength uses 50-bar lookback for adaptive scaling.
-          Uses fast rolling percentile to avoid O(n²) performance trap.
-          Handles NaNs safely.
-    """
-    momentum_period = 14
-    # ➕ Explicitly disable fill_method to avoid FutureWarning
-    roc = close.pct_change(periods=momentum_period, fill_method=None) * 100
-    momentum_ema = roc.ewm(span=momentum_period, adjust=False).mean()
-
-    # ➕ Safe sign conversion: NaN stays NaN (as float), then cast with care
-    momentum_sign = np.sign(momentum_ema.values)
-    # Convert to int8, but keep NaN as NaN in a float32 series first
-    momentum_direction = pd.Series(
-        momentum_sign, index=close.index, dtype=np.float32
-    ).fillna(0.0).astype(np.int8)
-
-    momentum_strength = _fast_rolling_percentile(momentum_ema.abs(), window=50)
-    return {
-        'momentum_ema': momentum_ema.astype(np.float32),
-        'momentum_direction': momentum_direction,
-        'momentum_strength': momentum_strength,
-    }
-
-
-def _compute_volatility_regime(atr: pd.Series) -> Dict[str, pd.Series]:
-    """
-    Classify market into volatility regimes based on ATR percentile.
-    :param atr: ATR series.
-    :return: Dictionary with:
-        - 'volatility_regime': category ('low', 'normal', 'high')
-        - 'vol_percentile': ATR rolling percentile (0.0–1.0)
-    :note: Uses 50-bar lookback. Thresholds: low <33%, high >66%.
-          Handles zero-ATR case (all equal prices) by forcing 'low'.
-    """
-    vol_lookback = 50
-
-    # Handle zero-ATR case
-    atol = 1e-10
-    if np.all(atr.values < atol):
-        vol_percentile = pd.Series(0.0, index=atr.index, dtype=np.float32)
+    # 1. Simple Momentum (velocity) - bar-over-bar close delta
+    momentum = np.zeros(n, dtype=np.float32)
+    if cfg['momentum_period'] == 1:
+        momentum[1:] = close[1:] - close[:-1]
     else:
-        vol_percentile = _fast_rolling_percentile(atr, window=vol_lookback)
+        # For longer period momentum (e.g., 5-bar momentum)
+        for i in range(cfg['momentum_period'], n):
+            momentum[i] = close[i] - close[i - cfg['momentum_period']]
 
-    # Predefine categories
-    vol_regime = pd.Categorical(
-        ['normal'] * len(atr),
-        categories=['low', 'normal', 'high'],
-        ordered=False
-    )
-    vol_regime = pd.Series(vol_regime, index=atr.index)
+    # 2. Acceleration - change in momentum
+    acceleration = np.zeros(n, dtype=np.float32)
+    if cfg['acceleration_period'] == 1:
+        acceleration[2:] = momentum[2:] - momentum[1:-1]
+    else:
+        for i in range(cfg['acceleration_period'] + 1, n):
+            acceleration[i] = momentum[i] - momentum[i - cfg['acceleration_period']]
 
-    vol_regime[vol_percentile < 0.33] = 'low'
-    vol_regime[vol_percentile > 0.66] = 'high'
+    # 3. Optional smoothing (simple moving average)
+    if cfg['smooth_momentum'] and cfg['smoothing_period'] > 1:
+        window = cfg['smoothing_period']
+        smoothed_momentum = np.zeros(n, dtype=np.float32)
+        for i in range(n):
+            start = max(0, i - window + 1)
+            smoothed_momentum[i] = momentum[start:i + 1].mean()
+        momentum = smoothed_momentum
 
-    return {
-        'volatility_regime': vol_regime,
-        'vol_percentile': vol_percentile,
+    # 4. Normalized by ATR (volatility-adjusted)
+    normalized_momentum = np.zeros(n, dtype=np.float32)
+    normalized_acceleration = np.zeros(n, dtype=np.float32)
+
+    if cfg['normalize_by_atr']:
+        safe_atr = np.maximum(atr, 1e-10)  # Avoid division by zero
+        normalized_momentum = momentum / safe_atr
+        normalized_acceleration = acceleration / safe_atr
+    else:
+        normalized_momentum = momentum
+        normalized_acceleration = acceleration
+
+    # 5. Momentum direction and strength
+    momentum_direction = np.sign(momentum).astype(np.int8)
+    momentum_strength = np.abs(normalized_momentum)
+
+    # Add columns
+    df['momentum'] = momentum
+    df['acceleration'] = acceleration
+    df['normalized_momentum'] = normalized_momentum
+    df['normalized_acceleration'] = normalized_acceleration
+    df['momentum_direction'] = momentum_direction
+    df['momentum_strength'] = momentum_strength
+
+    # 6. Momentum divergence flags (simplified)
+    df['momentum_divergence_bullish'] = False
+    df['momentum_divergence_bearish'] = False
+
+    # Simple divergence detection: price makes new high/low but momentum doesn't
+    if n > 10:
+        # Look for price highs with lower momentum
+        for i in range(5, n):
+            if df.iloc[i]['is_swing_high'] and i > 5:
+                # Check last few swing highs
+                prev_highs = []
+                for j in range(i - 1, max(0, i - 20), -1):
+                    if df.iloc[j]['is_swing_high']:
+                        prev_highs.append(j)
+                        if len(prev_highs) >= 2:
+                            break
+
+                if len(prev_highs) >= 2:
+                    # Bearish divergence: higher price, lower momentum
+                    price_rising = close[i] > close[prev_highs[0]]
+                    momentum_falling = normalized_momentum[i] < normalized_momentum[prev_highs[0]]
+                    if price_rising and momentum_falling:
+                        df.at[df.index[i], 'momentum_divergence_bearish'] = True
+
+        # Check for bullish divergence at swing lows
+        for i in range(5, n):
+            if df.iloc[i]['is_swing_low'] and i > 5:
+                # Check last few swing lows
+                prev_lows = []
+                for j in range(i - 1, max(0, i - 20), -1):
+                    if df.iloc[j]['is_swing_low']:
+                        prev_lows.append(j)
+                        if len(prev_lows) >= 2:
+                            break
+
+                if len(prev_lows) >= 2:
+                    # Bullish divergence: lower price, higher momentum
+                    price_falling = close[i] < close[prev_lows[0]]
+                    momentum_rising = normalized_momentum[i] > normalized_momentum[prev_lows[0]]
+                    if price_falling and momentum_rising:
+                        df.at[df.index[i], 'momentum_divergence_bullish'] = True
+
+    return df
+
+
+def _compute_range_dynamics(df: pd.DataFrame, config: Optional[Dict] = None) -> pd.DataFrame:
+    """
+    Detect range expansion/compression and volatility regimes.
+
+    Args:
+        df: DataFrame with 'high', 'low', and 'atr' columns
+        config: Optional configuration dict
+
+    Returns:
+        DataFrame with range dynamics columns
+    """
+    df = df.copy()
+
+    # Default configuration
+    default_config = {
+        'range_window': 20,
+        'expansion_threshold': 1.5,  # > 1.5x median range = expansion
+        'compression_threshold': 0.7,  # < 0.7x median range = compression
+        'squeeze_threshold': 0.5,  # < 0.5x median range = squeeze
+        'volatility_regime_window': 50,
     }
 
+    cfg = {**default_config, **(config or {})}
 
-def _compute_fractal_efficiency(close: pd.Series) -> Dict[str, pd.Series]:
+    high = df['high'].values.astype(np.float32)
+    low = df['low'].values.astype(np.float32)
+    atr = df['atr'].values.astype(np.float32)
+    n = len(df)
+
+    # 1. True range (or simple candle range)
+    candle_range = high - low
+
+    # 2. Rolling median range (more robust than mean)
+    rolling_range = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        start = max(0, i - cfg['range_window'] + 1)
+        rolling_range[i] = np.median(candle_range[start:i + 1])
+
+    # 3. Avoid division by zero and set reasonable defaults
+    safe_rolling_range = np.maximum(rolling_range, 1e-10)
+    range_ratio = candle_range / safe_rolling_range
+
+    # 4. Range expansion/compression flags
+    is_range_expansion = range_ratio > cfg['expansion_threshold']
+    is_range_compression = range_ratio < cfg['compression_threshold']
+    is_squeeze = range_ratio < cfg['squeeze_threshold']
+
+    # 5. Range acceleration (change in range size)
+    range_acceleration = np.zeros(n, dtype=np.float32)
+    range_acceleration[1:] = candle_range[1:] - candle_range[:-1]
+    normalized_range_acceleration = np.zeros(n, dtype=np.float32)
+
+    safe_atr = np.maximum(atr, 1e-10)
+    normalized_range_acceleration = range_acceleration / safe_atr
+
+    # 6. Volatility regime based on ATR percentile
+    atr_percentile = np.zeros(n, dtype=np.float32)
+    vol_window = min(cfg['volatility_regime_window'], n)
+
+    for i in range(n):
+        start = max(0, i - vol_window + 1)
+        window_atr = atr[start:i + 1]
+        atr_percentile[i] = np.sum(window_atr <= atr[i]) / len(window_atr)
+
+    # Classify volatility regime
+    volatility_regime = np.full(n, 'normal', dtype=object)
+    volatility_regime[atr_percentile > 0.66] = 'high'
+    volatility_regime[atr_percentile < 0.33] = 'low'
+
+    # 7. Range-close relationship
+    close = df['close'].values.astype(np.float32) if 'close' in df.columns else (high + low) / 2
+    close_location = np.zeros(n, dtype=np.float32)
+    safe_range = np.maximum(candle_range, 1e-10)
+    close_location = (close - low) / safe_range  # 0 = at low, 1 = at high
+
+    # 8. Inside/outside bar detection
+    is_inside_bar = np.zeros(n, dtype=bool)
+    is_outside_bar = np.zeros(n, dtype=bool)
+
+    for i in range(1, n):
+        # Inside bar: high <= prev high AND low >= prev low
+        is_inside_bar[i] = (high[i] <= high[i - 1]) and (low[i] >= low[i - 1])
+        # Outside bar: high > prev high AND low < prev low
+        is_outside_bar[i] = (high[i] > high[i - 1]) and (low[i] < low[i - 1])
+
+    # Add all columns
+    df['candle_range'] = candle_range
+    df['range_ratio'] = range_ratio
+    df['is_range_expansion'] = is_range_expansion
+    df['is_range_compression'] = is_range_compression
+    df['is_squeeze'] = is_squeeze
+    df['range_acceleration'] = range_acceleration
+    df['normalized_range_acceleration'] = normalized_range_acceleration
+    df['atr_percentile'] = atr_percentile
+    df['volatility_regime'] = volatility_regime
+    df['close_location'] = close_location
+    df['is_inside_bar'] = is_inside_bar
+    df['is_outside_bar'] = is_outside_bar
+
+    # 9. Range expansion quality score
+    range_quality = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        score = 0.0
+
+        # Base score from range ratio
+        if is_range_expansion[i]:
+            score += min(1.0, (range_ratio[i] - 1.0) / 2.0)  # 0-0.5 score
+
+        # Boost if expansion continues
+        if i > 0 and is_range_expansion[i] and is_range_expansion[i - 1]:
+            score *= 1.2
+
+        # Boost if with momentum in same direction
+        if 'normalized_momentum' in df.columns:
+            momentum = df['normalized_momentum'].iloc[i]
+            if abs(momentum) > 0.5:
+                score *= 1.1
+
+        # Boost if close is near high/low (directional conviction)
+        if close_location[i] > 0.7 or close_location[i] < 0.3:
+            score *= 1.1
+
+        range_quality[i] = min(1.0, score)
+
+    df['range_expansion_quality'] = range_quality
+
+    return df
+
+
+def _compute_fractal_efficiency_extended(close: pd.Series) -> Dict[str, pd.Series]:
     """
-    Compute Kaufman's Fractal Efficiency Ratio (trend quality vs. noise).
-    :param close: Close price series.
-    :return: Dictionary with:
-        - 'fractal_efficiency': 0.0 (chop) to 1.0 (perfect trend)
-        - 'is_efficient': boolean (≥0.6 threshold)
-    :note: Efficiency = |net change| / total path over 10 bars.
-          Safe division with epsilon to prevent NaNs.
+    Enhanced fractal efficiency with additional metrics.
+
+    Args:
+        close: Close price series
+
+    Returns:
+        Dictionary with fractal efficiency metrics
     """
     efficiency_period = 10
     if len(close) < efficiency_period:
@@ -241,32 +272,46 @@ def _compute_fractal_efficiency(close: pd.Series) -> Dict[str, pd.Series]:
         return {
             'fractal_efficiency': empty,
             'is_efficient': empty.astype(bool),
+            'fractal_slope': empty,
+            'fractal_consistency': empty,
         }
+
+    # Original fractal efficiency
     net_change = (close - close.shift(efficiency_period)).abs()
     path_length = close.diff().abs().rolling(window=efficiency_period, min_periods=1).sum()
     epsilon = 1e-10
     fractal_efficiency = net_change / (path_length + epsilon)
     fractal_efficiency = fractal_efficiency.clip(0.0, 1.0).fillna(0.0).astype(np.float32)
     is_efficient = fractal_efficiency >= 0.6
+
+    # Fractal slope (rate of change of efficiency)
+    fractal_slope = fractal_efficiency.diff().fillna(0.0).astype(np.float32)
+
+    # Fractal consistency (rolling standard deviation, low = consistent)
+    fractal_consistency = fractal_efficiency.rolling(window=20, min_periods=1).std().fillna(0.0).astype(np.float32)
+
     return {
         'fractal_efficiency': fractal_efficiency,
         'is_efficient': is_efficient,
+        'fractal_slope': fractal_slope,
+        'fractal_consistency': fractal_consistency,
     }
 
 
-def _compute_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
+# Update the main _compute_metrics function to include Group 4 metrics
+def _compute_metrics(df: pd.DataFrame, atr_period: int = 14, momentum_config: Optional[Dict] = None,
+                     range_config: Optional[Dict] = None) -> pd.DataFrame:
     """
-    Compute derived price metrics from OHLC data for structure break detection.
-    :param df: Input DataFrame containing 'open', 'high', 'low', 'close' columns.
-    :param atr_period: Period for Average True Range calculation (default: 14)
-    :return: A copy of `df` with added columns:
-        - Candle features: body, wicks, ratios, directional flags
-        - Volatility: 'atr'
-        - Momentum: 'momentum_ema', 'momentum_direction', 'momentum_strength'
-        - Volatility regime: 'volatility_regime', 'vol_percentile'
-        - Fractal efficiency: 'fractal_efficiency', 'is_efficient'
-    :note: Does not modify the original DataFrame. All computations are vectorized.
-          Critical performance fix: replaces slow pd.rank(pct=True) with fast alternative.
+    Compute all derived price metrics including Group 4 advanced behavior.
+
+    Args:
+        df: Input DataFrame containing 'open', 'high', 'low', 'close' columns.
+        atr_period: Period for Average True Range calculation
+        momentum_config: Optional configuration for momentum metrics
+        range_config: Optional configuration for range dynamics
+
+    Returns:
+        DataFrame with all metrics added
     """
     required_cols = {'open', 'high', 'low', 'close'}
     if not required_cols.issubset(df.columns):
@@ -275,7 +320,7 @@ def _compute_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
 
     if df.empty:
         result = df.copy()
-        # ➕ Add all expected columns with empty values
+        # Add all expected columns with empty values
         result = result.assign(
             body=0.0,
             candle_range=0.0,
@@ -295,40 +340,119 @@ def _compute_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
                                              categories=['low', 'normal', 'high']),
             vol_percentile=0.0,
             fractal_efficiency=0.0,
-            is_efficient=False
+            is_efficient=False,
+            # ➕ GROUP 4 METRICS
+            momentum=0.0,
+            acceleration=0.0,
+            normalized_momentum=0.0,
+            normalized_acceleration=0.0,
+            momentum_direction_g4=0,
+            momentum_strength_g4=0.0,
+            momentum_divergence_bullish=False,
+            momentum_divergence_bearish=False,
+            candle_range_g4=0.0,
+            range_ratio=1.0,
+            is_range_expansion=False,
+            is_range_compression=False,
+            is_squeeze=False,
+            range_acceleration=0.0,
+            normalized_range_acceleration=0.0,
+            atr_percentile=0.5,
+            volatility_regime_g4='normal',
+            close_location_g4=0.5,
+            is_inside_bar=False,
+            is_outside_bar=False,
+            range_expansion_quality=0.0,
+            fractal_slope=0.0,
+            fractal_consistency=0.0,
         )
         return result
 
+    # Extract arrays for performance
     open_arr = df['open'].values
     high_arr = df['high'].values
     low_arr = df['low'].values
     close_arr = df['close'].values
 
+    # 1. Compute basic candle features (existing)
     candle_features = _compute_candle_features(open_arr, high_arr, low_arr, close_arr)
-    atr = _compute_atr(df['high'], df['low'], df['close'], atr_period)
-    momentum_features = _compute_momentum(df['close'])
-    vol_features = _compute_volatility_regime(atr)
-    eff_features = _compute_fractal_efficiency(df['close'])
 
+    # 2. Compute ATR (existing)
+    atr = _compute_atr(df['high'], df['low'], df['close'], atr_period)
+
+    # 3. Compute momentum features (existing)
+    momentum_features = _compute_momentum(df['close'])
+
+    # 4. Compute volatility regime (existing)
+    vol_features = _compute_volatility_regime(atr)
+
+    # 5. Compute fractal efficiency (existing + extended)
+    eff_features = _compute_fractal_efficiency_extended(df['close'])
+
+    # 6. ➕ GROUP 4: Compute advanced momentum metrics
+    # Create temp DataFrame with basic metrics for momentum calculation
+    temp_df = pd.DataFrame({
+        'close': close_arr,
+        'atr': atr.values,
+        'is_swing_high': df['is_swing_high'].values if 'is_swing_high' in df.columns else np.zeros(len(df), dtype=bool),
+        'is_swing_low': df['is_swing_low'].values if 'is_swing_low' in df.columns else np.zeros(len(df), dtype=bool),
+    }, index=df.index)
+
+    momentum_metrics_df = _compute_momentum_metrics(temp_df, momentum_config)
+
+    # 7. ➕ GROUP 4: Compute range dynamics
+    range_df = pd.DataFrame({
+        'high': high_arr,
+        'low': low_arr,
+        'close': close_arr,
+        'atr': atr.values,
+    }, index=df.index)
+
+    range_metrics_df = _compute_range_dynamics(range_df, range_config)
+
+    # Combine all results
     result = df.copy()
+
+    # Add existing features
     result = result.assign(
         **candle_features,
         atr=atr,
         **momentum_features,
         **vol_features,
-        **eff_features
     )
+
+    # Add fractal efficiency metrics (including extended ones)
+    result['fractal_efficiency'] = eff_features['fractal_efficiency']
+    result['is_efficient'] = eff_features['is_efficient']
+    result['fractal_slope'] = eff_features['fractal_slope']
+    result['fractal_consistency'] = eff_features['fractal_consistency']
+
+    # ➕ Add Group 4 momentum metrics
+    momentum_cols = ['momentum', 'acceleration', 'normalized_momentum', 'normalized_acceleration',
+                     'momentum_direction', 'momentum_strength', 'momentum_divergence_bullish',
+                     'momentum_divergence_bearish']
+    for col in momentum_cols:
+        if col in momentum_metrics_df.columns:
+            result[col + '_g4'] = momentum_metrics_df[col]
+
+    # ➕ Add Group 4 range dynamics metrics
+    range_cols = ['candle_range', 'range_ratio', 'is_range_expansion', 'is_range_compression',
+                  'is_squeeze', 'range_acceleration', 'normalized_range_acceleration',
+                  'atr_percentile', 'volatility_regime', 'close_location', 'is_inside_bar',
+                  'is_outside_bar', 'range_expansion_quality']
+    for col in range_cols:
+        if col in range_metrics_df.columns:
+            # Rename to avoid conflicts with existing columns
+            new_name = col if col not in result.columns else col + '_g4'
+            result[new_name] = range_metrics_df[col]
+
     return result
 
 
-# Add to structure/failures/calcs.py (at the end of the file)
-
+# Keep the convenience wrapper for backward compatibility
 def compute_all_metrics(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
     """
     Compute all metrics for structure break detection.
-
-    This is a convenience wrapper that ensures all required metrics
-    are computed for the detector.
 
     Args:
         df: Input DataFrame with OHLC data
