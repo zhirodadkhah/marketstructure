@@ -186,7 +186,8 @@ class BarProcessor:
             min_move: float,
             config: StructureBreakConfig,
             active_levels: Dict[Tuple[str, int], BreakLevel],
-            builder: ResultBuilder
+            builder: ResultBuilder,
+            zone_info: Optional[Dict] = None
     ) -> None:
         """
         Process potential breakouts and create new break levels.
@@ -208,6 +209,7 @@ class BarProcessor:
         :param config: Configuration
         :param active_levels: Active break levels
         :param builder: Result builder
+        :param zone_info: zone_strength, retest_quality, etc.
         """
         signal_map = {
             'bos_bull': 'is_bos_bullish_initial',
@@ -220,7 +222,6 @@ class BarProcessor:
             if target is None:
                 continue
 
-            # Check breakout conditions
             should_break = BarProcessor._check_breakout_conditions(
                 target=target,
                 close=close,
@@ -237,6 +238,20 @@ class BarProcessor:
             if should_break:
                 key = (role, target.idx)
                 if key not in active_levels:
+                    # ➕ GET ZONE CONTEXT FOR THIS BREAK
+                    zone_strength = 0
+                    retest_quality = 0.0
+                    is_confluence_zone = False
+                    retest_count = 0
+                    signal_zone_score = 0.0
+
+                    if zone_info is not None and bar_index < len(zone_info.get('zone_strength', [])):
+                        zone_strength = zone_info['zone_strength'][bar_index]
+                        retest_quality = zone_info['retest_quality'][bar_index]
+                        is_confluence_zone = zone_info['is_confluence_zone'][bar_index]
+                        retest_count = zone_info['retest_count'][bar_index]
+                        signal_zone_score = zone_info['signal_zone_score'][bar_index]
+
                     level = BreakLevel(
                         swing_idx=target.idx,
                         price=target.price,
@@ -245,7 +260,13 @@ class BarProcessor:
                         break_idx=bar_index,
                         atr_at_break=atr_val,
                         is_gap_break=gap_breaks[role],
-                        config=config
+                        config=config,
+                        # ➕ PASS ZONE CONTEXT
+                        zone_strength=zone_strength,
+                        retest_quality=retest_quality,
+                        is_confluence_zone=is_confluence_zone,
+                        retest_count=retest_count,
+                        signal_zone_score=signal_zone_score
                     )
 
                     if not gap_breaks[role]:
@@ -256,6 +277,12 @@ class BarProcessor:
 
                     active_levels[key] = level
                     builder.set_signal(signal_map[role], bar_index)
+
+                    # ➕ OPTIONAL: Boost signal if high zone confluence
+                    if is_confluence_zone and zone_strength >= 3:
+                        # You could add a special signal flag for high-confluence breaks
+                        pass
+
 
     @staticmethod
     def _update_active_level(

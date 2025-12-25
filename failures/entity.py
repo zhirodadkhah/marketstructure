@@ -46,13 +46,18 @@ class LevelState(IntEnum):
     FOLLOW_THROUGH_PENDING = 5  # waiting for confirmation
 
 
+# In entity.py, update the BreakLevel class:
+
 class BreakLevel:
     __slots__ = (
         'swing_idx', 'price', 'direction', 'role', 'break_idx', 'atr_at_break',
         'is_gap_break', 'max_post_break_high', 'min_post_break_low',
         'retest_active', 'retest_start_idx', 'state', 'buffer',
         'moved_away_distance', 'retest_attempts', 'follow_through_start',
-        'follow_through_progress'
+        'follow_through_progress',
+        # ➕ ZONE CONTEXT
+        'zone_strength', 'retest_quality', 'is_confluence_zone',
+        'retest_count', 'signal_zone_score'
     )
 
     def __init__(
@@ -64,7 +69,13 @@ class BreakLevel:
             break_idx: int,
             atr_at_break: float,
             is_gap_break: bool,
-            config: StructureBreakConfig
+            config: StructureBreakConfig,
+            # ➕ ZONE CONTEXT
+            zone_strength: int = 0,
+            retest_quality: float = 0.0,
+            is_confluence_zone: bool = False,
+            retest_count: int = 0,
+            signal_zone_score: float = 0.0
     ):
         self.swing_idx = swing_idx
         self.price = price
@@ -79,19 +90,22 @@ class BreakLevel:
         self.state = LevelState.BROKEN
         self.retest_attempts = 0
         self.follow_through_start = break_idx if not is_gap_break else None
-        self.follow_through_progress = 0  # count of qualifying closes
+        self.follow_through_progress = 0
 
-        # Initialize extremes; gap breaks still track real price movement
+        # ➕ ZONE CONTEXT
+        self.zone_strength = zone_strength
+        self.retest_quality = retest_quality
+        self.is_confluence_zone = is_confluence_zone
+        self.retest_count = retest_count
+        self.signal_zone_score = signal_zone_score
+
         if is_gap_break:
             self.moved_away_distance = config.min_break_atr_mult * atr_at_break
-
         else:
             self.moved_away_distance = 0.0
 
-        # Keep extremes as -inf/inf for both cases
         self.max_post_break_high = -np.inf
         self.min_post_break_low = np.inf
-
 
 @dataclass
 class BreakTarget:

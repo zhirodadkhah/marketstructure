@@ -1,10 +1,12 @@
+# config.py
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class StructureBreakConfig:
     """Immutable configuration for structure break detection."""
-    # Existing structure break config
+
+    # --- EXISTING STRUCTURE BREAK CONFIG ---
     min_break_body_ratio: float = 0.6
     min_break_atr_mult: float = 0.5
     pullback_min_bars: int = 2
@@ -18,10 +20,10 @@ class StructureBreakConfig:
     follow_through_bars: int = 3
     follow_through_close_ratio: float = 0.6
 
-    # ➕ ATR CONFIG (for consistency)
+    # --- ATR CONFIG ---
     atr_period: int = 14
 
-    # ➕ REGIME DETECTION CONFIG
+    # --- GROUP 1: MARKET REGIME CONFIG ---
     enable_regime_detection: bool = True
     regime_swing_window: int = 100
     regime_atr_slope_window: int = 20
@@ -34,7 +36,7 @@ class StructureBreakConfig:
     regime_consistency_high: float = 0.6
     regime_atr_slope_threshold: float = 0.001
 
-    # ➕ SESSION CONFIG
+    # --- GROUP 1: SESSION CONFIG ---
     enable_session_tagging: bool = True
     session_timezone: str = 'UTC'
     session_asia_start: int = 0
@@ -45,3 +47,12 @@ class StructureBreakConfig:
     session_ny_end: int = 21
     session_london_ny_overlap_start: int = 12
     session_london_ny_overlap_end: int = 16
+
+    # --- GROUP 2: ZONE DETECTION CONFIG ---
+    zone_detection_enabled: bool = True
+    zone_lookback_bars: int = 200
+    zone_proximity_atr_mult: float = 1.5
+    min_zone_strength: int = 2
+    zone_buffer_multiplier: float = 0.5
+    zone_active_window: int = 50
+    max_zones: int = 100

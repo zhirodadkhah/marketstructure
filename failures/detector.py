@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from collections import defaultdict
 
+from structure import detect_support_resistance_zones
 from structure.failures.bar import BarProcessor
 from structure.failures.config import StructureBreakConfig
 from structure.failures.entity import BreakLevel, ResultBuilder, LevelState, SIGNAL_COLS
@@ -98,6 +99,22 @@ def detect_structure_breaks(
             df_calc['session'] = pd.Series('unknown', index=df_calc.index)
             df_calc['liquidity_score'] = 0.5
             df_calc['is_high_liquidity'] = False
+
+    if config.zone_detection_enabled:
+        try:
+            df_calc = detect_support_resistance_zones(df_calc, config)
+        except Exception as e:
+            # Fallback: neutral zone info
+            df_calc['zone_id'] = -1
+            df_calc['zone_price'] = np.nan
+            df_calc['zone_strength'] = 0
+            df_calc['zone_type'] = 'none'
+            df_calc['is_confluence_zone'] = False
+            df_calc['retest_quality'] = 0.0
+            df_calc['retest_count'] = 0
+            df_calc['is_double_test'] = False
+            df_calc['is_triple_test'] = False
+            df_calc['signal_zone_score'] = 0.0
 
     # ➕ PRE-EXTRACT ALL COLUMNS AS NUMPY ARRAYS
     n = len(df_calc)

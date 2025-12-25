@@ -8,6 +8,7 @@ from .trends import detect_trend_state
 from .failures.regime import detect_market_regime
 from .failures.market_hours import tag_sessions, add_liquidity_awareness
 from .failures.signal_filter import RegimeSignalFilter
+from .failures.zones import detect_support_resistance_zones
 
 __all__ = [
     'StructureBreakConfig',
@@ -19,4 +20,5 @@ __all__ = [
     'tag_sessions',
     'add_liquidity_awareness',
     'RegimeSignalFilter',
+    'detect_support_resistance_zones'
 ]
