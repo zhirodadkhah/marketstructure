@@ -38,10 +38,10 @@ def compute_range_metrics(
     :return: Typed dict of range metrics
     :raise ValueError: if window < 1 or arrays mismatched
     """
-    # VALIDATE DTYPES — INCLUDE atr
+    # VALIDATE DTYPES
     if not all(
-        np.issubdtype(arr.dtype, np.number)
-        for arr in (high, low, close, atr)
+            np.issubdtype(arr.dtype, np.number)
+            for arr in (high, low, close, atr)
     ):
         raise TypeError("All input arrays must have numeric dtypes.")
 
@@ -51,9 +51,6 @@ def compute_range_metrics(
     if high.ndim != 1:
         raise ValueError("Inputs must be 1-dimensional arrays.")
 
-    # ➕ VALIDATE DTYPES
-    if not all(np.issubdtype(arr.dtype, np.number) for arr in (high, low, close)):
-        raise TypeError("All input arrays must have numeric dtypes.")
 
     n = len(close)
     if not all(len(x) == n for x in (high, low, atr)):
