@@ -12,9 +12,9 @@ def score_signals(
     config: SignalQualityConfig
 ) -> SignalQuality:
     """
-    Compute quality scores for each signal type.
-    Cyclomatic complexity: 2 | Args: 6
-    """
+        Compute quality scores for each signal type.
+        Cyclomatic complexity: 2 | Args: 6
+        """
     n = len(market_regime)
     base_score = 0.5
 
@@ -36,6 +36,6 @@ def score_signals(
     return SignalQuality(
         bos_bullish_quality=_compute_score(validated_signals.is_bos_bullish_confirmed),
         bos_bearish_quality=_compute_score(validated_signals.is_bos_bearish_confirmed),
-        choch_bullish_quality=_compute_score(np.zeros(n, bool)),  # placeholder
-        choch_bearish_quality=_compute_score(np.zeros(n, bool))   # placeholder
+        choch_bullish_quality=_compute_score(np.zeros(n, bool)),
+        choch_bearish_quality=_compute_score(np.zeros(n, bool))
     )
