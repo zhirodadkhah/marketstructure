@@ -34,11 +34,49 @@ class SessionConfig:
     ny_close: int = 21 * 3600
     timezone_offset: int = 0  # UTC offset in seconds
 
+
 @dataclass(frozen=True)
 class ZoneConfig:
-    clustering_radius: float = 1.5  # in ATR units
+    """Configuration for zone detection and confluence scoring."""
+
+    # Core detection
+    swing_window: int = 2
+    recent_bars: int = 100
+    clustering_radius: float = 1.0  # In ATR units
     min_cluster_size: int = 3
-    recent_bars: int = 200  # only consider recent swings
+    buffer_multiplier: float = 0.5  # ATR multiplier for touch detection
+
+    # Confluence thresholds
+    min_confluence_strength: int = 4  # Zones with >= this strength are confluence
+
+    # Multi-touch settings
+    min_touch_bars: int = 3  # Minimum bars between touches to count as separate
+
+    # ATR settings
+    atr_period: int = 14
+
+    # Score weights
+    quality_weight: float = 0.4
+    double_weight: float = 0.1
+    triple_weight: float = 0.2
+    confluence_weight: float = 0.3
+
+    def __post_init__(self):
+        """Validate configuration."""
+        if self.swing_window < 1:
+            raise ValueError("swing_window must be >= 1")
+        if self.recent_bars < 10:
+            raise ValueError("recent_bars must be >= 10")
+        if self.clustering_radius <= 0:
+            raise ValueError("clustering_radius must be > 0")
+        if self.min_cluster_size < 2:
+            raise ValueError("min_cluster_size must be >= 2")
+        if self.min_confluence_strength < self.min_cluster_size:
+            raise ValueError("min_confluence_strength must be >= min_cluster_size")
+        if not (0.99 <= sum([self.quality_weight, self.double_weight,
+                             self.triple_weight, self.confluence_weight]) <= 1.01):
+            raise ValueError("Score weights must sum to approximately 1.0")
+
 
 @dataclass(frozen=True)
 class MTFConfig:
