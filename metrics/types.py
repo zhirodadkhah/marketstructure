@@ -4,15 +4,17 @@ import numpy as np
 from typing import TypeAlias, TypedDict
 from numpy.typing import NDArray
 
-LongFloatArray: TypeAlias = NDArray[np.float64]
+FloatLongArray: TypeAlias = NDArray[np.float64]
 FloatArray: TypeAlias = NDArray[np.float32]
 BoolArray: TypeAlias = NDArray[np.bool_]
-IntArray: TypeAlias = NDArray[np.int8]
+IntArray: TypeAlias = NDArray[np.int32]
+IntTinyArray: TypeAlias = NDArray[np.int8]
 
 
-Timestamps = LongFloatArray
 
-TrendStateArray = IntArray
+TrendStateArray = IntTinyArray
+
+Timestamps = FloatLongArray
 
 Prices      = FloatArray
 ATRArray    = FloatArray       # VolatilityArray, ATR is volatility in price units
@@ -24,6 +26,15 @@ StructureLabel  = BoolArray
 SignalMask      = BoolArray
 RegimeMask      = BoolArray
 SessionMask     = BoolArray
+
+@dataclass
+class RetestMetrics:
+    retest_velocity: FloatArray
+    bars_to_retest: IntArray
+    pullback_distance: FloatArray
+    is_fast_retest: BoolArray
+    is_slow_retest: BoolArray
+    retest_attempts: IntArray
 
 
 @dataclass
