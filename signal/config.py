@@ -12,6 +12,7 @@ class SignalValidatorConfig:
     pullback_min_bars: int = 3
     pullback_max_bars: int = 50
     max_pullback_velocity: float = 0.8
+    min_retest_respect_bars: int = 5  # ✅ ADD THIS
 
 @dataclass(frozen=True)
 class SignalFilterConfig:
