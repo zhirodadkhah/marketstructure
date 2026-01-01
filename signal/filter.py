@@ -1,42 +1,89 @@
 # structure/signal/filter.py
 """
-Filter signals based on market context.
+Context-aware signal filtering based on regime, range, and retest quality.
+Pure vectorized logic with clear, testable conditions.
 """
-from typing import Dict
+from typing import Dict, Optional
 import numpy as np
 from structure.metrics.types import ValidatedSignals
 from .config import SignalFilterConfig
 
 
 def filter_signals(
-    validated_signals: ValidatedSignals,
-    market_regime: np.ndarray,
-    zone_confluence: np.ndarray,
-    is_range_compression: np.ndarray,
-    retest_velocity: np.ndarray,
-    session: np.ndarray,
-    config: SignalFilterConfig
+        validated_signals: ValidatedSignals,
+        market_regime: np.ndarray,
+        is_range_compression: np.ndarray,
+        retest_respect_score: Optional[np.ndarray],
+        config: SignalFilterConfig
 ) -> ValidatedSignals:
     """
-        Apply context-aware filtering to validated signals.
+    Filter signals using market context and retest quality.
 
-        Cyclomatic complexity: 2
-        Args: 7 → but can be grouped as "context" dict if needed
-        """
-    trend_mask = (market_regime == 'strong_trend') | (market_regime == 'weak_trend')
-    confluence_mask = zone_confluence >= config.min_zone_confluence
-    compression_mask = ~is_range_compression if config.avoid_range_compression else np.ones_like(is_range_compression, dtype=bool)
-    fast_retest_mask = retest_velocity <= 0.5
-    if config.avoid_fast_retests:
-        fast_retest_mask = ~fast_retest_mask
+    Parameters
+    ----------
+    validated_signals : ValidatedSignals
+        Input signals to filter.
+    market_regime : np.ndarray[str]
+        Market regime labels.
+    is_range_compression : np.ndarray[bool]
+        True if bar is in range compression.
+    retest_respect_score : np.ndarray[float32], optional
+        Retest respect score [0,1]. If None, skips retest filter.
+    config : SignalFilterConfig
+        Filtering thresholds and flags.
 
-    global_filter = trend_mask & confluence_mask & compression_mask & fast_retest_mask
+    Returns
+    -------
+    ValidatedSignals
+        Filtered signal masks.
 
-    return ValidatedSignals(
-        is_bos_bullish_confirmed=validated_signals.is_bos_bullish_confirmed & global_filter,
-        is_bos_bearish_confirmed=validated_signals.is_bos_bearish_confirmed & global_filter,
-        is_bos_bullish_momentum=validated_signals.is_bos_bullish_momentum & global_filter,
-        is_bos_bearish_momentum=validated_signals.is_bos_bearish_momentum & global_filter,
-        is_bullish_break_failure=validated_signals.is_bullish_break_failure & global_filter,
-        is_bearish_break_failure=validated_signals.is_bearish_break_failure & global_filter
-    )
+    Filtering Logic
+    ---------------
+    A signal is **rejected** if ANY of:
+    1. `market_regime == 'chop'` AND signal is BOS
+    2. `is_range_compression == True` (if `avoid_range_compression`)
+    3. `retest_respect_score < min_retest_respect_score` (if provided)
+
+    Notes
+    -----
+    - All logic is vectorized (no loops)
+    - CHOCH signals are **not filtered** by regime (only BOS)
+    - Time Complexity: O(n)
+    """
+    n = len(market_regime)
+
+    # === 1. Regime filter: reject BOS in chop ===
+    is_chop = (market_regime == 'chop')
+    chop_reject = is_chop  # Applies to BOS only
+
+    # === 2. Range compression filter ===
+    compression_reject = is_range_compression if config.avoid_range_compression else np.zeros(n, dtype=bool)
+
+    # === 3. Retest respect filter ===
+    retest_reject = np.zeros(n, dtype=bool)
+    if retest_respect_score is not None and config.min_retest_respect_score is not None:
+        retest_reject = retest_respect_score < config.min_retest_respect_score
+
+    # === COMBINE REJECTION MASKS ===
+    global_reject = chop_reject | compression_reject | retest_reject
+
+    # === APPLY TO BOS SIGNALS ONLY (not CHOCH or failures) ===
+    # Only confirmed BOS signals are filtered by regime/compression
+    bos_signals = [
+        'is_bos_bullish_confirmed',
+        'is_bos_bearish_confirmed',
+        'is_bos_bullish_momentum',
+        'is_bos_bearish_momentum'
+    ]
+
+    filtered_dict = {}
+    for field in validated_signals.__dataclass_fields__:
+        original_mask = getattr(validated_signals, field)
+        if field in bos_signals:
+            filtered_mask = original_mask & (~global_reject)
+        else:
+            # Keep failures, CHOCH, etc. unchanged
+            filtered_mask = original_mask
+        filtered_dict[field] = filtered_mask
+
+    return ValidatedSignals(**filtered_dict)
