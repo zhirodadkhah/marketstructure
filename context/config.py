@@ -82,3 +82,4 @@ class ZoneConfig:
 class MTFConfig:
     htf_bar_size: int = 24  # e.g., 24 → 1D from 1H
     alignment_method: str = "backward"  # "backward", "forward", "center"
+    min_confluence_score: float = 0.6  # For signal filtering
