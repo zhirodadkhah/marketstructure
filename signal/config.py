@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from typing import Optional
+
 
 @dataclass(frozen=True)
 class SignalGeneratorConfig:
@@ -20,6 +22,7 @@ class SignalFilterConfig:
     min_zone_confluence: float = 0.5
     avoid_range_compression: bool = True
     avoid_fast_retests: bool = False
+    min_retest_respect_score: Optional[float] = 0.6  # ➕ NEW
 
 @dataclass(frozen=True)
 class SignalQualityConfig:

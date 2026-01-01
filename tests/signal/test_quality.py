@@ -2,7 +2,7 @@
 import pytest
 import numpy as np
 from structure.signal.quality import score_signals
-from structure.metrics.types import ValidatedSignals
+from structure.metrics.types import ValidatedSignals, SignalQuality
 from structure.signal.config import SignalQualityConfig
 
 
@@ -326,15 +326,348 @@ def test_quality_score_calculation():
         )
     )
 
-    # Calculate expected score:
-    # base_score = 0.5
-    # regime_boost = 1.0 * 0.2 = 0.2 (strong_trend is trending)
-    # zone_boost = 0.8 * 0.15 = 0.12
-    # liquidity_boost = 0.7 * 0.1 = 0.07
-    # session_boost = (1.1 - 1.0) * 0.1 = 0.01 (ny weight = 1.1)
-    # total = 0.5 + 0.2 + 0.12 + 0.07 + 0.01 = 0.9
-    # clipped to <= 1.0, so 0.9
-
     expected_score = 0.9
     tolerance = 0.001
     assert abs(result.bos_bullish_quality[0] - expected_score) < tolerance
+
+
+
+
+# tests/signal/test_quality.py
+    """
+    Comprehensive test suite for signal quality scoring.
+    Tests the score_signals function with various market contexts.
+    """
+
+def create_test_signals(n: int = 10) -> ValidatedSignals:
+        """Create test signal masks for testing."""
+        return ValidatedSignals(
+            is_bos_bullish_confirmed=np.array([1, 0, 1, 0, 1, 0, 0, 0, 0, 0][:n], dtype=bool),
+            is_bos_bearish_confirmed=np.array([0, 1, 0, 1, 0, 0, 0, 0, 0, 0][:n], dtype=bool),
+            is_bos_bullish_momentum=np.array([0, 0, 1, 0, 0, 0, 0, 0, 0, 0][:n], dtype=bool),
+            is_bos_bearish_momentum=np.array([0, 0, 0, 1, 0, 0, 0, 0, 0, 0][:n], dtype=bool),
+            is_bullish_break_failure=np.array([0, 0, 0, 0, 1, 0, 0, 0, 0, 0][:n], dtype=bool),
+            is_bearish_break_failure=np.array([0, 0, 0, 0, 0, 1, 0, 0, 0, 0][:n], dtype=bool)
+        )
+
+def test_score_signals_basic_functionality():
+        """Test basic signal scoring returns correct type and shape."""
+        signals = create_test_signals()
+        n = len(signals.is_bos_bullish_confirmed)
+
+        # Create test data
+        market_regime = np.array(['strong_trend'] * n)
+        session = np.array(['ny'] * n)
+        liquidity_score = np.ones(n, dtype=np.float32) * 0.8
+        zone_confluence = np.ones(n, dtype=np.float32) * 0.7
+        config = SignalQualityConfig()
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence, config
+        )
+
+        # Check output types
+        assert isinstance(result, SignalQuality)
+        assert len(result.bos_bullish_quality) == n
+        assert len(result.bos_bearish_quality) == n
+
+        # Scores should be between 0 and 1
+        assert np.all(result.bos_bullish_quality >= 0.0)
+        assert np.all(result.bos_bullish_quality <= 1.0)
+        assert np.all(result.bos_bearish_quality >= 0.0)
+        assert np.all(result.bos_bearish_quality <= 1.0)
+
+        # Check that only active signals get scores
+        assert result.bos_bullish_quality[0] > 0.0  # Signal at index 0
+        assert result.bos_bullish_quality[1] == 0.0  # No signal at index 1
+
+
+def test_score_signals_regime_boost():
+    """Test that trending regimes boost signal scores."""
+    n = 5
+    signals = create_validated_signals(
+        n,
+        bos_bullish=np.array([1, 1, 1, 1, 1], dtype=bool)
+    )
+
+    # Mix trending and non-trending regimes
+    market_regime = np.array(['strong_trend', 'weak_trend', 'ranging', 'chop', 'neutral'])
+    session = np.array(['ny'] * n)
+    liquidity_score = np.ones(n, dtype=np.float32) * 0.5
+    zone_confluence = np.ones(n, dtype=np.float32) * 0.5
+    config = SignalQualityConfig(regime_boost=0.2)
+
+    result = score_signals(
+        signals, market_regime, session,
+        liquidity_score, zone_confluence, config
+    )
+
+    # Both strong_trend and weak_trend are trending regimes, so they should get the same boost
+    strong_trend_score = result.bos_bullish_quality[0]
+    weak_trend_score = result.bos_bullish_quality[1]
+    ranging_score = result.bos_bullish_quality[2]
+    chop_score = result.bos_bullish_quality[3]
+    neutral_score = result.bos_bullish_quality[4]
+
+    # strong_trend and weak_trend should have equal scores (both are trending)
+    assert strong_trend_score == weak_trend_score, "Both trending regimes should have same score"
+
+    # Both trending regimes should score higher than non-trending regimes
+    assert strong_trend_score > ranging_score, "strong_trend should score higher than ranging"
+    assert weak_trend_score > chop_score, "weak_trend should score higher than chop"
+    assert strong_trend_score > neutral_score, "strong_trend should score higher than neutral"
+    assert weak_trend_score > neutral_score, "weak_trend should score higher than neutral"
+def test_score_signals_session_weighting():
+        """Test session-specific weighting affects scores."""
+        n = 4
+        signals = ValidatedSignals(
+            is_bos_bullish_confirmed=np.ones(n, dtype=bool),
+            is_bos_bearish_confirmed=np.zeros(n, dtype=bool),
+            is_bos_bullish_momentum=np.zeros(n, dtype=bool),
+            is_bos_bearish_momentum=np.zeros(n, dtype=bool),
+            is_bullish_break_failure=np.zeros(n, dtype=bool),
+            is_bearish_break_failure=np.zeros(n, dtype=bool)
+        )
+
+        # Different sessions with different weights
+        market_regime = np.array(['neutral'] * n)
+        session = np.array(['overlap', 'ny', 'asia', 'low_liquidity'])
+        liquidity_score = np.ones(n, dtype=np.float32) * 0.5
+        zone_confluence = np.ones(n, dtype=np.float32) * 0.5
+        config = SignalQualityConfig()
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence, config
+        )
+
+        # Check session weighting order: overlap (1.2) > ny (1.1) > asia (0.9) > low_liquidity (0.7)
+        overlap_score = result.bos_bullish_quality[0]
+        ny_score = result.bos_bullish_quality[1]
+        asia_score = result.bos_bullish_quality[2]
+        low_liquidity_score = result.bos_bullish_quality[3]
+
+        assert overlap_score > ny_score, "overlap should score higher than ny"
+        assert ny_score > asia_score, "ny should score higher than asia"
+        assert asia_score > low_liquidity_score, "asia should score higher than low_liquidity"
+
+def test_score_signals_liquidity_boost():
+        """Test that higher liquidity scores boost signal quality."""
+        n = 3
+        signals = ValidatedSignals(
+            is_bos_bullish_confirmed=np.ones(n, dtype=bool),
+            is_bos_bearish_confirmed=np.zeros(n, dtype=bool),
+            is_bos_bullish_momentum=np.zeros(n, dtype=bool),
+            is_bos_bearish_momentum=np.zeros(n, dtype=bool),
+            is_bullish_break_failure=np.zeros(n, dtype=bool),
+            is_bearish_break_failure=np.zeros(n, dtype=bool)
+        )
+
+        market_regime = np.array(['neutral'] * n)
+        session = np.array(['ny'] * n)
+        liquidity_score = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+        zone_confluence = np.ones(n, dtype=np.float32) * 0.5
+        config = SignalQualityConfig()
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence, config
+        )
+
+        # Higher liquidity should give higher scores
+        low_liquidity_score = result.bos_bullish_quality[0]
+        medium_liquidity_score = result.bos_bullish_quality[1]
+        high_liquidity_score = result.bos_bullish_quality[2]
+
+        assert high_liquidity_score > medium_liquidity_score, "1.0 liquidity should score higher than 0.5"
+        assert medium_liquidity_score > low_liquidity_score, "0.5 liquidity should score higher than 0.0"
+
+def test_score_signals_zone_confluence_boost():
+        """Test zone confluence contributes to signal quality."""
+        n = 3
+        signals = ValidatedSignals(
+            is_bos_bullish_confirmed=np.ones(n, dtype=bool),
+            is_bos_bearish_confirmed=np.zeros(n, dtype=bool),
+            is_bos_bullish_momentum=np.zeros(n, dtype=bool),
+            is_bos_bearish_momentum=np.zeros(n, dtype=bool),
+            is_bullish_break_failure=np.zeros(n, dtype=bool),
+            is_bearish_break_failure=np.zeros(n, dtype=bool)
+        )
+
+        market_regime = np.array(['neutral'] * n)
+        session = np.array(['ny'] * n)
+        liquidity_score = np.ones(n, dtype=np.float32) * 0.5
+        zone_confluence = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+        config = SignalQualityConfig(zone_boost=0.3)
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence, config
+        )
+
+        # Higher zone confluence should give higher scores
+        no_zone_score = result.bos_bullish_quality[0]
+        medium_zone_score = result.bos_bullish_quality[1]
+        high_zone_score = result.bos_bullish_quality[2]
+
+        assert high_zone_score > medium_zone_score, "1.0 zone should score higher than 0.5"
+        assert medium_zone_score > no_zone_score, "0.5 zone should score higher than 0.0"
+
+def test_score_signals_score_clipping():
+        """Test that scores are properly clipped to [0, 1] range."""
+        n = 2
+        signals = ValidatedSignals(
+            is_bos_bullish_confirmed=np.ones(n, dtype=bool),
+            is_bos_bearish_confirmed=np.zeros(n, dtype=bool),
+            is_bos_bullish_momentum=np.zeros(n, dtype=bool),
+            is_bos_bearish_momentum=np.zeros(n, dtype=bool),
+            is_bullish_break_failure=np.zeros(n, dtype=bool),
+            is_bearish_break_failure=np.zeros(n, dtype=bool)
+        )
+
+        # Create extreme values that could push scores beyond bounds
+        market_regime = np.array(['strong_trend', 'strong_trend'])
+        session = np.array(['overlap', 'overlap'])  # Max boost
+        liquidity_score = np.array([1.0, 1.0], dtype=np.float32)  # Max
+        zone_confluence = np.array([1.0, 1.0], dtype=np.float32)  # Max
+        config = SignalQualityConfig(
+            regime_boost=1.0,  # Extreme boost
+            zone_boost=1.0,  # Extreme boost
+            session_weights={'overlap': 2.0}  # Extreme boost
+        )
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence, config
+        )
+
+        # Scores should be clipped to [0, 1]
+        assert np.all(result.bos_bullish_quality >= 0.0)
+        assert np.all(result.bos_bullish_quality <= 1.0)
+        assert np.all(result.bos_bullish_quality == 1.0), "Extreme boosts should max at 1.0"
+
+def test_score_signals_empty_input():
+        """Test handling of empty arrays."""
+        n = 0
+        signals = ValidatedSignals(
+            is_bos_bullish_confirmed=np.array([], dtype=bool),
+            is_bos_bearish_confirmed=np.array([], dtype=bool),
+            is_bos_bullish_momentum=np.array([], dtype=bool),
+            is_bos_bearish_momentum=np.array([], dtype=bool),
+            is_bullish_break_failure=np.array([], dtype=bool),
+            is_bearish_break_failure=np.array([], dtype=bool)
+        )
+
+        market_regime = np.array([], dtype=str)
+        session = np.array([], dtype=str)
+        liquidity_score = np.array([], dtype=np.float32)
+        zone_confluence = np.array([], dtype=np.float32)
+        config = SignalQualityConfig()
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence, config
+        )
+
+        # Should return empty arrays without crashing
+        assert len(result.bos_bullish_quality) == 0
+        assert len(result.bos_bearish_quality) == 0
+        assert len(result.choch_bullish_quality) == 0
+        assert len(result.choch_bearish_quality) == 0
+
+def test_score_signals_custom_session_weights():
+        """Test custom session weight configuration."""
+        n = 3
+        signals = ValidatedSignals(
+            is_bos_bullish_confirmed=np.ones(n, dtype=bool),
+            is_bos_bearish_confirmed=np.zeros(n, dtype=bool),
+            is_bos_bullish_momentum=np.zeros(n, dtype=bool),
+            is_bos_bearish_momentum=np.zeros(n, dtype=bool),
+            is_bullish_break_failure=np.zeros(n, dtype=bool),
+            is_bearish_break_failure=np.zeros(n, dtype=bool)
+        )
+
+        market_regime = np.array(['neutral'] * n)
+        session = np.array(['custom_high', 'custom_medium', 'custom_low'])
+        liquidity_score = np.ones(n, dtype=np.float32) * 0.5
+        zone_confluence = np.ones(n, dtype=np.float32) * 0.5
+
+        # Custom session weights
+        custom_weights = {
+            'custom_high': 1.3,  # +30% boost
+            'custom_medium': 1.0,  # Neutral
+            'custom_low': 0.7  # -30% penalty
+        }
+        config = SignalQualityConfig(session_weights=custom_weights)
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence, config
+        )
+
+        # Check custom weighting
+        high_score = result.bos_bullish_quality[0]
+        medium_score = result.bos_bullish_quality[1]
+        low_score = result.bos_bullish_quality[2]
+
+        assert high_score > medium_score, "custom_high should score higher than custom_medium"
+        assert medium_score > low_score, "custom_medium should score higher than custom_low"
+
+def test_score_signals_cho_signals_zero():
+        """Test that CHOCH signals return zero scores (not implemented)."""
+        n = 3
+        signals = create_test_signals(n)
+
+        market_regime = np.array(['neutral'] * n)
+        session = np.array(['ny'] * n)
+        liquidity_score = np.ones(n, dtype=np.float32) * 0.8
+        zone_confluence = np.ones(n, dtype=np.float32) * 0.7
+        config = SignalQualityConfig()
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence, config
+        )
+
+        # CHOCH signals should be zero (not implemented yet)
+        assert np.all(result.choch_bullish_quality == 0.0)
+        assert np.all(result.choch_bearish_quality == 0.0)
+
+def test_score_signals_performance():
+        """Performance test with large dataset."""
+        n = 10000
+
+        # Create large test dataset
+        signals = ValidatedSignals(
+            is_bos_bullish_confirmed=np.random.choice([True, False], n),
+            is_bos_bearish_confirmed=np.random.choice([True, False], n),
+            is_bos_bullish_momentum=np.random.choice([True, False], n),
+            is_bos_bearish_momentum=np.random.choice([True, False], n),
+            is_bullish_break_failure=np.random.choice([True, False], n),
+            is_bearish_break_failure=np.random.choice([True, False], n)
+        )
+
+        market_regime = np.random.choice(['strong_trend', 'weak_trend', 'ranging', 'chop'], n)
+        session = np.random.choice(['overlap', 'ny', 'london', 'asia'], n)
+        liquidity_score = np.random.uniform(0, 1, n).astype(np.float32)
+        zone_confluence = np.random.uniform(0, 1, n).astype(np.float32)
+
+        import time
+        start = time.time()
+
+        result = score_signals(
+            signals, market_regime, session,
+            liquidity_score, zone_confluence,
+            SignalQualityConfig()
+        )
+
+        elapsed = time.time() - start
+
+        # Should complete quickly (O(n) complexity)
+        assert elapsed < 0.5, f"Too slow: {elapsed:.3f}s for {n} elements"
+
+        # Verify output
+        assert len(result.bos_bullish_quality) == n
+        assert np.all(result.bos_bullish_quality >= 0.0)
+        assert np.all(result.bos_bullish_quality <= 1.0)
