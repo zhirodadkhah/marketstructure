@@ -35,6 +35,11 @@ class RetestMetrics:
     is_fast_retest: BoolArray
     is_slow_retest: BoolArray
     retest_attempts: IntArray
+    # Extended fields for full metrics
+    retest_close: FloatArray
+    retest_indices: IntArray
+    break_levels: FloatArray
+    direction: str
 
 
 @dataclass
