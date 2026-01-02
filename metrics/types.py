@@ -44,7 +44,7 @@ class RawSignals:
     is_choch_bullish: SignalMask
     is_choch_bearish: SignalMask
 
-
+# structure/metrics/types.py
 @dataclass
 class ValidatedSignals:
     is_bos_bullish_confirmed: SignalMask
@@ -53,6 +53,11 @@ class ValidatedSignals:
     is_bos_bearish_momentum: SignalMask
     is_bullish_break_failure: SignalMask
     is_bearish_break_failure: SignalMask
+    # ➕ NEW: Immediate & CHOCH failures
+    is_bullish_immediate_failure: SignalMask
+    is_bearish_immediate_failure: SignalMask
+    is_failed_choch_bullish: SignalMask
+    is_failed_choch_bearish: SignalMask
 
 
 @dataclass
