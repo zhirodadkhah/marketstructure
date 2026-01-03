@@ -14,7 +14,7 @@ All functions are pure NumPy and vectorized for performance.
 """
 
 from .generator import generate_raw_signals
-from .validator import validate_signals, get_full_retest_metrics, validate_signals_with_quality
+from .validator import validate_signals
 from .filter import filter_signals
 from .quality import score_signals
 from .config import (
@@ -30,10 +30,6 @@ __all__ = [
     "validate_signals",
     "filter_signals",
     "score_signals",
-
-    # Advanced utilities
-    "get_full_retest_metrics",
-    "validate_signals_with_quality",
 
     # Configs
     "SignalGeneratorConfig",
