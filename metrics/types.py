@@ -67,7 +67,55 @@ class ValidatedSignals:
 
 @dataclass
 class SignalQuality:
-    bos_bullish_quality: FloatArray
-    bos_bearish_quality: FloatArray
+    """Quality scores [0.1, 1.0] for all signal types."""
+
+    # BOS confirmed signals (trend continuation with retest)
+    bos_bullish_confirmed_quality: FloatArray
+    bos_bearish_confirmed_quality: FloatArray
+
+    # BOS momentum signals (trend continuation without retest)
+    bos_bullish_momentum_quality: FloatArray
+    bos_bearish_momentum_quality: FloatArray
+
+    # CHOCH reversal signals (valid reversals)
     choch_bullish_quality: FloatArray
     choch_bearish_quality: FloatArray
+
+    # Failed signals (minimal quality for filtering)
+    failed_bullish_quality: FloatArray  # Failed BOS bullish
+    failed_bearish_quality: FloatArray  # Failed BOS bearish
+    failed_choch_bullish_quality: FloatArray  # Failed CHOCH bullish
+    failed_choch_bearish_quality: FloatArray  # Failed CHOCH bearish
+
+    def __post_init__(self):
+        """Validate all quality arrays."""
+        arrays = [
+            self.bos_bullish_confirmed_quality,
+            self.bos_bearish_confirmed_quality,
+            self.bos_bullish_momentum_quality,
+            self.bos_bearish_momentum_quality,
+            self.choch_bullish_quality,
+            self.choch_bearish_quality,
+            self.failed_bullish_quality,
+            self.failed_bearish_quality,
+            self.failed_choch_bullish_quality,
+            self.failed_choch_bearish_quality
+        ]
+
+        # Check all arrays have same length
+        lengths = [len(arr) for arr in arrays]
+        if len(set(lengths)) != 1:
+            field_names = list(self.__annotations__.keys())
+            length_map = dict(zip(field_names, lengths))
+            raise ValueError(
+                f"All quality arrays must have same length. Got: {length_map}"
+            )
+
+        # Validate score ranges
+        for name, arr in self.__dict__.items():
+            if np.any((arr < 0) | (arr > 1)):
+                min_val = np.min(arr)
+                max_val = np.max(arr)
+                raise ValueError(
+                    f"{name} must be in range [0, 1], got [{min_val:.3f}, {max_val:.3f}]"
+                )
