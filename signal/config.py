@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict
 
 
 @dataclass(frozen=True)
@@ -79,15 +79,34 @@ class SignalFilterConfig:
     avoid_fast_retests: bool = False
     min_retest_respect_score: Optional[float] = 0.6  # ➕ NEW
 
+# Add to structure/signal/config.py
 @dataclass(frozen=True)
 class SignalQualityConfig:
-    session_weights: dict = None
+    """
+    Configuration for signal quality scoring.
+    All boost values are additive to base score (0.5 for BOS confirmed).
+    """
+    session_weights: Dict[str, float] = None
     regime_boost: float = 0.2
     zone_boost: float = 0.15
+    liquidity_boost: float = 0.1
+    session_boost_scale: float = 0.1
 
     def __post_init__(self):
         if self.session_weights is None:
             object.__setattr__(self, 'session_weights', {
-                'overlap': 1.2, 'ny': 1.1, 'london': 1.0,
-                'asia': 0.8, 'low_liquidity': 0.5
+                'overlap': 1.2,
+                'ny': 1.1,
+                'london': 1.0,
+                'asia': 0.8,
+                'low_liquidity': 0.5
             })
+        # Validate bounds
+        if not (0 <= self.regime_boost <= 0.3):
+            raise ValueError("regime_boost must be in [0, 0.3]")
+        if not (0 <= self.zone_boost <= 0.3):
+            raise ValueError("zone_boost must be in [0, 0.3]")
+        if not (0 <= self.liquidity_boost <= 0.2):
+            raise ValueError("liquidity_boost must be in [0, 0.2]")
+        if not (0 <= self.session_boost_scale <= 0.2):
+            raise ValueError("session_boost_scale must be in [0, 0.2]")
