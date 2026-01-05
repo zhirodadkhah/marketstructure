@@ -71,6 +71,7 @@ class SignalValidatorConfig:
         if self.immediate_failure_bars < 1:
             raise ValueError("immediate_failure_bars must be ≥ 1")
 
+
 @dataclass(frozen=True)
 class SignalFilterConfig:
     """Configuration for signal filtering."""
