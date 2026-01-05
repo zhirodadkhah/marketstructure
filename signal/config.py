@@ -73,11 +73,13 @@ class SignalValidatorConfig:
 
 @dataclass(frozen=True)
 class SignalFilterConfig:
-    min_regime_score: float = 0.6
-    min_zone_confluence: float = 0.5
-    avoid_range_compression: bool = True
-    avoid_fast_retests: bool = False
-    min_retest_respect_score: Optional[float] = 0.6  # ➕ NEW
+    """Configuration for signal filtering."""
+    max_range_compression: float = 0.7
+    max_range_compression_choch: float = 0.8
+    max_range_compression_momentum: float = 0.6
+    min_retest_respect_filter: float = 0.5
+    min_retest_respect_filter_choch: float = 0.4
+    allow_weak_trend_bos: bool = True
 
 # Add to structure/signal/config.py
 @dataclass(frozen=True)
