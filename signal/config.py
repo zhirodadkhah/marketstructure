@@ -72,6 +72,8 @@ class SignalValidatorConfig:
             raise ValueError("immediate_failure_bars must be ≥ 1")
 
 
+# In signal/config.py, update SignalFilterConfig:
+
 @dataclass(frozen=True)
 class SignalFilterConfig:
     """Configuration for signal filtering."""
@@ -82,7 +84,26 @@ class SignalFilterConfig:
     min_retest_respect_filter_choch: float = 0.4
     allow_weak_trend_bos: bool = True
 
-# Add to structure/signal/config.py
+    def __post_init__(self):
+        """Validate filter configuration bounds."""
+        # Range compression thresholds must be in [0, 1]
+        for name, value in [
+            ("max_range_compression", self.max_range_compression),
+            ("max_range_compression_choch", self.max_range_compression_choch),
+            ("max_range_compression_momentum", self.max_range_compression_momentum)
+        ]:
+            if not (0 <= value <= 1):
+                raise ValueError(f"{name} must be in range [0, 1], got {value}")
+
+        # Retest respect thresholds must be in [0, 1]
+        for name, value in [
+            ("min_retest_respect_filter", self.min_retest_respect_filter),
+            ("min_retest_respect_filter_choch", self.min_retest_respect_filter_choch)
+        ]:
+            if not (0 <= value <= 1):
+                raise ValueError(f"{name} must be in range [0, 1], got {value}")
+
+
 @dataclass(frozen=True)
 class SignalQualityConfig:
     """
