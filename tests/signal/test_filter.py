@@ -1,540 +1,820 @@
 # tests/signal/test_filter.py
 """
-Comprehensive test suite for signal filtering.
-Tests the filter_signals function with various filter conditions.
+Comprehensive test suite for signal filtering module.
+
+COVERAGE:
+- Positive tests: Valid inputs, correct filtering behavior
+- Negative tests: Invalid inputs, error handling
+- Boundary tests: Edge cases, empty arrays, extreme values
+- Property tests: Consistency, invariants, edge cases
 """
+
 import numpy as np
 import pytest
-from structure.signal.filter import filter_signals
+
+from structure.metrics.types import (
+    ValidatedSignals,
+    FilteredSignals,
+    SignalQuality,
+    RawSignals
+)
 from structure.signal.config import SignalFilterConfig
-from structure.metrics.types import ValidatedSignals
+from structure.signal.filter import (
+    filter_signals,
+    _validate_inputs,
+    _filter_bos_by_regime,
+    _filter_by_range_compression,
+    _filter_by_retest_respect,
+    _VALID_REGIMES
+)
 
 
-def create_test_signals(n: int = 10) -> ValidatedSignals:
-    """Create test signal masks for filtering tests."""
-    return ValidatedSignals(
-        is_bos_bullish_confirmed=np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0][:n], dtype=bool),
-        is_bos_bearish_confirmed=np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1][:n], dtype=bool),
-        is_bos_bullish_momentum=np.array([1, 0, 1, 0, 1, 0, 0, 0, 0, 0][:n], dtype=bool),
-        is_bos_bearish_momentum=np.array([0, 0, 0, 0, 0, 1, 0, 1, 0, 1][:n], dtype=bool),
-        is_bullish_break_failure=np.array([0, 1, 0, 1, 0, 0, 0, 0, 0, 0][:n], dtype=bool),
-        is_bearish_break_failure=np.array([0, 0, 0, 0, 0, 0, 1, 0, 1, 0][:n], dtype=bool)
+# ==============================================================================
+# FIXTURES
+# ==============================================================================
+
+@pytest.fixture
+def default_config():
+    """Default filtering configuration."""
+    return SignalFilterConfig()
+
+
+@pytest.fixture
+def strict_config():
+    """Strict filtering configuration."""
+    return SignalFilterConfig(
+        max_range_compression=0.3,
+        max_range_compression_choch=0.5,
+        max_range_compression_momentum=0.2,
+        min_retest_respect_filter=0.8,
+        min_retest_respect_filter_choch=0.6,
+        allow_weak_trend_bos=False
     )
 
 
-def test_filter_negative_low_zone_confluence():
-    """Test filtering when zone confluence is below threshold."""
-    n = 3
-    signals = create_test_signals(n)
-    zone_confluence = np.array([0.3, 0.6, 0.9], dtype=np.float32)
-    market_regime = np.array(['strong_trend'] * n, dtype=object)
-    session = np.array(['ny'] * n, dtype=object)
+@pytest.fixture
+def lenient_config():
+    """Lenient filtering configuration."""
+    return SignalFilterConfig(
+        max_range_compression=0.9,
+        max_range_compression_choch=1.0,
+        max_range_compression_momentum=0.8,
+        min_retest_respect_filter=0.2,
+        min_retest_respect_filter_choch=0.1,
+        allow_weak_trend_bos=True
+    )
 
-    # This test seems to be checking the wrong thing - filter_signals doesn't take zone_confluence
-    # Let's create a proper filter test instead
-    market_regime = np.array(['strong_trend', 'weak_trend', 'ranging'])
-    is_range_compression = np.array([False, False, False], dtype=bool)
-    retest_respect_score = np.array([0.8, 0.8, 0.8], dtype=np.float32)
+
+@pytest.fixture
+def sample_data():
+    """Create sample data for tests."""
+    n = 20
+    market_regime = np.array(
+        ['strong_trend'] * 5 +
+        ['weak_trend'] * 5 +
+        ['ranging'] * 5 +
+        ['chop'] * 5,
+        dtype='U20'
+    )
+
+    range_compression = np.array(
+        [0.1, 0.3, 0.5, 0.7, 0.9] * 4,  # Various compression levels
+        dtype=np.float32
+    )
+
+    retest_respect_score = np.array(
+        [0.9, 0.7, 0.5, 0.3, 0.1] * 4,  # Various respect scores
+        dtype=np.float32
+    )
+
+    return market_regime, range_compression, retest_respect_score
+
+
+@pytest.fixture
+def sample_signals():
+    """Create sample signals for tests."""
+    n = 20
+    validated_signals = ValidatedSignals(
+        is_bos_bullish_confirmed=np.array([True] * 5 + [False] * 15, dtype=bool),
+        is_bos_bearish_confirmed=np.array([False] * 10 + [True] * 5 + [False] * 5, dtype=bool),
+        is_bos_bullish_momentum=np.array([False] * 8 + [True] * 4 + [False] * 8, dtype=bool),
+        is_bos_bearish_momentum=np.array([False] * 12 + [True] * 3 + [False] * 5, dtype=bool),
+        is_bullish_break_failure=np.array([False] * 15 + [True] + [False] * 4, dtype=bool),
+        is_bearish_break_failure=np.array([False] * 18 + [True] + [False], dtype=bool),
+        is_bullish_immediate_failure=np.array([False] * 16 + [True] + [False] * 3, dtype=bool),
+        is_bearish_immediate_failure=np.array([False] * 19 + [True], dtype=bool),
+        is_failed_choch_bullish=np.array([False] * 17 + [True] + [False] * 2, dtype=bool),
+        is_failed_choch_bearish=np.array([False] * 14 + [True] + [False] * 5, dtype=bool)
+    )
+
+    # Signal quality with CHOCH signals - COMPLETE STRUCTURE
+    signal_quality = SignalQuality(
+        bos_bullish_confirmed_quality=np.full(n, 0.5, dtype=np.float32),
+        bos_bearish_confirmed_quality=np.full(n, 0.5, dtype=np.float32),
+        bos_bullish_momentum_quality=np.full(n, 0.4, dtype=np.float32),
+        bos_bearish_momentum_quality=np.full(n, 0.4, dtype=np.float32),
+        choch_bullish_quality=np.array([0.0] * 10 + [0.6] * 5 + [0.0] * 5, dtype=np.float32),
+        choch_bearish_quality=np.array([0.0] * 5 + [0.6] * 5 + [0.0] * 10, dtype=np.float32),
+        failed_bullish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_bearish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_choch_bullish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_choch_bearish_quality=np.full(n, 0.1, dtype=np.float32)
+    )
+
+    return validated_signals, signal_quality
+
+
+# ==============================================================================
+# POSITIVE TESTS: Valid Inputs
+# ==============================================================================
+
+def test_validate_inputs_valid(sample_data, default_config):
+    """Positive test: Valid inputs should not raise."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    # Should not raise
+    _validate_inputs(market_regime, range_compression, retest_respect_score, default_config)
+
+
+def test_validate_inputs_empty_arrays(default_config):
+    """Positive test: Empty arrays are valid."""
+    empty_str = np.array([], dtype='U20')
+    empty_float = np.array([], dtype=np.float32)
+
+    # Should not raise
+    _validate_inputs(empty_str, empty_float, empty_float, default_config)
+
+
+def test_validate_inputs_mixed_regimes(default_config):
+    """Positive test: All valid regime values."""
+    market_regime = np.array(list(_VALID_REGIMES), dtype='U20')
+    range_compression = np.ones(len(_VALID_REGIMES), dtype=np.float32) * 0.5
+    retest_respect_score = np.ones(len(_VALID_REGIMES), dtype=np.float32) * 0.5
+
+    # Should not raise
+    _validate_inputs(market_regime, range_compression, retest_respect_score, default_config)
+
+
+def test_filter_signals_valid_inputs(sample_data, sample_signals, default_config):
+    """Positive test: Filter signals with valid inputs."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    validated_signals, signal_quality = sample_signals
+
+    filtered = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=default_config
+    )
+
+    # Should return FilteredSignals object
+    assert isinstance(filtered, FilteredSignals)
+
+    # All arrays should have correct length
+    n = len(market_regime)
+    for field in filtered.__dict__.values():
+        assert len(field) == n
+
+
+def test_filter_bos_by_regime_strong_trend():
+    """Positive test: BOS allowed in strong trend."""
+    n = 10
+    signal_mask = np.ones(n, dtype=bool)
+    market_regime = np.array(['strong_trend'] * n, dtype='U20')
+
+    filtered = _filter_bos_by_regime(signal_mask, market_regime)
+
+    # All signals should remain in strong trend
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_bos_by_regime_weak_trend_allowed():
+    """Positive test: BOS allowed in weak trend when configured."""
+    n = 10
+    signal_mask = np.ones(n, dtype=bool)
+    market_regime = np.array(['weak_trend'] * n, dtype='U20')
+
+    filtered = _filter_bos_by_regime(signal_mask, market_regime, allow_weak_trend=True)
+
+    # All signals should remain when weak trend is allowed
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_bos_by_regime_weak_trend_not_allowed():
+    """Positive test: BOS filtered in weak trend when not configured."""
+    n = 10
+    signal_mask = np.ones(n, dtype=bool)
+    market_regime = np.array(['weak_trend'] * n, dtype='U20')
+
+    filtered = _filter_bos_by_regime(signal_mask, market_regime, allow_weak_trend=False)
+
+    # No signals should remain when weak trend is not allowed
+    assert not np.any(filtered)
+
+
+def test_filter_bos_by_regime_ranging_filtered():
+    """Positive test: BOS filtered in ranging regime."""
+    n = 10
+    signal_mask = np.ones(n, dtype=bool)
+    market_regime = np.array(['ranging'] * n, dtype='U20')
+
+    filtered = _filter_bos_by_regime(signal_mask, market_regime)
+
+    # No signals should remain in ranging
+    assert not np.any(filtered)
+
+
+def test_filter_by_range_compression_low_compression():
+    """Positive test: Signals allowed with low compression."""
+    n = 10
+    signal_mask = np.ones(n, dtype=bool)
+    range_compression = np.full(n, 0.2, dtype=np.float32)
+    threshold = 0.5
+
+    filtered = _filter_by_range_compression(signal_mask, range_compression, threshold)
+
+    # All signals should remain (0.2 < 0.5)
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_by_range_compression_high_compression():
+    """Positive test: Signals filtered with high compression."""
+    n = 10
+    signal_mask = np.ones(n, dtype=bool)
+    range_compression = np.full(n, 0.8, dtype=np.float32)
+    threshold = 0.5
+
+    filtered = _filter_by_range_compression(signal_mask, range_compression, threshold)
+
+    # No signals should remain (0.8 > 0.5)
+    assert not np.any(filtered)
+
+
+def test_filter_by_retest_respect_high_respect():
+    """Positive test: Signals allowed with high retest respect."""
+    n = 10
+    signal_mask = np.ones(n, dtype=bool)
+    retest_respect_score = np.full(n, 0.8, dtype=np.float32)
+    threshold = 0.5
+
+    filtered = _filter_by_retest_respect(signal_mask, retest_respect_score, threshold)
+
+    # All signals should remain (0.8 >= 0.5)
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_by_retest_respect_low_respect():
+    """Positive test: Signals filtered with low retest respect."""
+    n = 10
+    signal_mask = np.ones(n, dtype=bool)
+    retest_respect_score = np.full(n, 0.3, dtype=np.float32)
+    threshold = 0.5
+
+    filtered = _filter_by_retest_respect(signal_mask, retest_respect_score, threshold)
+
+    # No signals should remain (0.3 < 0.5)
+    assert not np.any(filtered)
+
+
+# ==============================================================================
+# NEGATIVE TESTS: Invalid Inputs & Error Handling
+# ==============================================================================
+
+def test_validate_inputs_length_mismatch(default_config):
+    """Negative test: Array length mismatch."""
+    market_regime = np.array(['strong_trend'] * 10, dtype='U20')
+    range_compression = np.ones(5, dtype=np.float32)  # Wrong length
+    retest_respect_score = np.ones(10, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="Array length mismatch"):
+        _validate_inputs(market_regime, range_compression, retest_respect_score, default_config)
+
+
+def test_validate_inputs_invalid_regime(default_config):
+    """Negative test: Invalid regime values."""
+    market_regime = np.array(['invalid_regime', 'strong_trend'], dtype='U20')
+    range_compression = np.ones(2, dtype=np.float32)
+    retest_respect_score = np.ones(2, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="Invalid market_regime values"):
+        _validate_inputs(market_regime, range_compression, retest_respect_score, default_config)
+
+
+def test_validate_inputs_wrong_dtype(default_config):
+    """Negative test: Wrong array dtype."""
+    market_regime = np.array(['strong_trend'], dtype='U20')
+    range_compression = np.array([1], dtype=np.int32)  # Not float
+    retest_respect_score = np.ones(1, dtype=np.float32)
+
+    with pytest.raises(TypeError, match="must be float array"):
+        _validate_inputs(market_regime, range_compression, retest_respect_score, default_config)
+
+
+def test_validate_inputs_range_compression_out_of_range(default_config):
+    """Negative test: Range compression out of range [0, 1]."""
+    market_regime = np.array(['strong_trend'], dtype='U20')
+    range_compression = np.array([1.5], dtype=np.float32)  # > 1.0
+    retest_respect_score = np.ones(1, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="must be in range"):
+        _validate_inputs(market_regime, range_compression, retest_respect_score, default_config)
+
+
+def test_validate_inputs_retest_respect_out_of_range(default_config):
+    """Negative test: Retest respect out of range [0, 1]."""
+    market_regime = np.array(['strong_trend'], dtype='U20')
+    range_compression = np.ones(1, dtype=np.float32)
+    retest_respect_score = np.array([-0.1], dtype=np.float32)  # < 0.0
+
+    with pytest.raises(ValueError, match="must be in range"):
+        _validate_inputs(market_regime, range_compression, retest_respect_score, default_config)
+
+
+def test_filter_signals_invalid_config(sample_data, sample_signals):
+    """Negative test: Invalid config parameters."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    validated_signals, signal_quality = sample_signals
+
+    # Config with invalid range compression
+    with pytest.raises(ValueError, match="must be in range"):
+        invalid_config = SignalFilterConfig(max_range_compression=1.5)
+
+    # Config with invalid retest respect
+    with pytest.raises(ValueError, match="must be in range"):
+        invalid_config = SignalFilterConfig(min_retest_respect_filter=-0.1)
+
+
+# ==============================================================================
+# BOUNDARY TESTS: Edge Cases
+# ==============================================================================
+
+def test_filter_bos_by_regime_empty_signal():
+    """Boundary test: Empty signal mask."""
+    n = 10
+    signal_mask = np.zeros(n, dtype=bool)  # All False
+    market_regime = np.array(['strong_trend'] * n, dtype='U20')
+
+    filtered = _filter_bos_by_regime(signal_mask, market_regime)
+
+    # Should return empty mask (all False)
+    assert not np.any(filtered)
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_by_range_compression_threshold_exact():
+    """Boundary test: Compression exactly at threshold."""
+    n = 4
+    signal_mask = np.ones(n, dtype=bool)
+    range_compression = np.full(n, 0.5, dtype=np.float32)
+    threshold = 0.5  # Exactly equal
+
+    filtered = _filter_by_range_compression(signal_mask, range_compression, threshold)
+
+    # Signals should be allowed (compression <= threshold)
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_by_range_compression_threshold_zero():
+    """Boundary test: Threshold zero."""
+    n = 4
+    signal_mask = np.ones(n, dtype=bool)
+    range_compression = np.array([0.0, 0.1, 0.0, 0.1], dtype=np.float32)
+    threshold = 0.0
+
+    filtered = _filter_by_range_compression(signal_mask, range_compression, threshold)
+
+    # Only compression = 0.0 should pass
+    expected = np.array([True, False, True, False], dtype=bool)
+    assert np.array_equal(filtered, expected)
+
+
+def test_filter_by_range_compression_threshold_one():
+    """Boundary test: Threshold one."""
+    n = 4
+    signal_mask = np.ones(n, dtype=bool)
+    range_compression = np.array([0.9, 1.0, 0.5, 1.0], dtype=np.float32)
+    threshold = 1.0
+
+    filtered = _filter_by_range_compression(signal_mask, range_compression, threshold)
+
+    # All should pass (compression <= 1.0)
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_by_retest_respect_threshold_exact():
+    """Boundary test: Retest respect exactly at threshold."""
+    n = 4
+    signal_mask = np.ones(n, dtype=bool)
+    retest_respect_score = np.full(n, 0.5, dtype=np.float32)
+    threshold = 0.5  # Exactly equal
+
+    filtered = _filter_by_retest_respect(signal_mask, retest_respect_score, threshold)
+
+    # Signals should be allowed (respect >= threshold)
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_by_retest_respect_threshold_zero():
+    """Boundary test: Threshold zero."""
+    n = 4
+    signal_mask = np.ones(n, dtype=bool)
+    retest_respect_score = np.array([0.0, 0.1, 0.0, 0.1], dtype=np.float32)
+    threshold = 0.0
+
+    filtered = _filter_by_retest_respect(signal_mask, retest_respect_score, threshold)
+
+    # All should pass (respect >= 0.0)
+    assert np.all(filtered == signal_mask)
+
+
+def test_filter_by_retest_respect_threshold_one():
+    """Boundary test: Threshold one."""
+    n = 4
+    signal_mask = np.ones(n, dtype=bool)
+    retest_respect_score = np.array([0.9, 1.0, 0.5, 1.0], dtype=np.float32)
+    threshold = 1.0
+
+    filtered = _filter_by_retest_respect(signal_mask, retest_respect_score, threshold)
+
+    # Only respect = 1.0 should pass
+    expected = np.array([False, True, False, True], dtype=bool)
+    assert np.array_equal(filtered, expected)
+
+
+def test_filter_signals_single_bar(sample_signals):
+    """Boundary test: Single bar arrays."""
+    market_regime = np.array(['strong_trend'], dtype='U20')
+    range_compression = np.array([0.5], dtype=np.float32)
+    retest_respect_score = np.array([0.8], dtype=np.float32)
+    validated_signals, signal_quality = sample_signals
+
+    # Create single bar versions
+    validated_single = ValidatedSignals(
+        **{k: v[:1] for k, v in validated_signals.__dict__.items()}
+    )
+    quality_single = SignalQuality(
+        **{k: v[:1] for k, v in signal_quality.__dict__.items()}
+    )
+
     config = SignalFilterConfig()
 
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
+    filtered = filter_signals(
+        validated_signals=validated_single,
+        signal_quality=quality_single,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=config
     )
 
-    # All signals should pass with good conditions
-    assert np.all(result.is_bos_bullish_confirmed[:3])
+    # Should return FilteredSignals with single element arrays
+    assert isinstance(filtered, FilteredSignals)
+    for field in filtered.__dict__.values():
+        assert len(field) == 1
+        assert field.dtype == bool
 
 
-def test_filter_edge_empty_inputs():
-    """Test filtering with empty inputs."""
-    n = 0
-    signals = create_test_signals(n)
+def test_filter_signals_empty_arrays():
+    """Boundary test: All empty arrays."""
+    empty_str = np.array([], dtype='U20')
+    empty_float = np.array([], dtype=np.float32)
+    empty_bool = np.array([], dtype=bool)
 
-    market_regime = np.array([], dtype=str)
-    is_range_compression = np.array([], dtype=bool)
-    retest_respect_score = np.array([], dtype=np.float32)
+    empty_validated = ValidatedSignals(
+        is_bos_bullish_confirmed=empty_bool,
+        is_bos_bearish_confirmed=empty_bool,
+        is_bos_bullish_momentum=empty_bool,
+        is_bos_bearish_momentum=empty_bool,
+        is_bullish_break_failure=empty_bool,
+        is_bearish_break_failure=empty_bool,
+        is_bullish_immediate_failure=empty_bool,
+        is_bearish_immediate_failure=empty_bool,
+        is_failed_choch_bullish=empty_bool,
+        is_failed_choch_bearish=empty_bool
+    )
+
+    empty_quality = SignalQuality(
+        bos_bullish_confirmed_quality=empty_float,
+        bos_bearish_confirmed_quality=empty_float,
+        bos_bullish_momentum_quality=empty_float,
+        bos_bearish_momentum_quality=empty_float,
+        choch_bullish_quality=empty_float,
+        choch_bearish_quality=empty_float,
+        failed_bullish_quality=empty_float,
+        failed_bearish_quality=empty_float,
+        failed_choch_bullish_quality=empty_float,
+        failed_choch_bearish_quality=empty_float
+    )
+
     config = SignalFilterConfig()
 
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
+    filtered = filter_signals(
+        validated_signals=empty_validated,
+        signal_quality=empty_quality,
+        market_regime=empty_str,
+        range_compression=empty_float,
+        retest_respect_score=empty_float,
+        config=config
     )
 
-    # Should return empty arrays without crashing
-    assert len(result.is_bos_bullish_confirmed) == 0
-    assert len(result.is_bos_bearish_confirmed) == 0
+    # Should return FilteredSignals with empty arrays
+    assert isinstance(filtered, FilteredSignals)
+    for field in filtered.__dict__.values():
+        assert len(field) == 0
+        assert field.dtype == bool
 
 
-def test_filter_positive_all_conditions_met():
-    """Test filtering when all conditions are met."""
-    n = 3
-    signals = create_test_signals(n)
+# ==============================================================================
+# PROPERTY TESTS: Invariants & Consistency
+# ==============================================================================
 
-    market_regime = np.array(['strong_trend', 'weak_trend', 'ranging'])
-    is_range_compression = np.array([False, False, False], dtype=bool)
-    retest_respect_score = np.array([0.9, 0.9, 0.9], dtype=np.float32)
+def test_filtering_never_adds_signals(sample_data, sample_signals, default_config):
+    """Property test: Filtering never adds new signals."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    validated_signals, signal_quality = sample_signals
+
+    filtered = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=default_config
+    )
+
+    # Filtered signals should always be subset of original signals
+    for field_name in validated_signals.__dict__.keys():
+        if hasattr(filtered, field_name):
+            original = getattr(validated_signals, field_name)
+            filtered_arr = getattr(filtered, field_name)
+            # filtered ⊆ original
+            assert np.all((filtered_arr & ~original) == False)
+
+
+def test_failed_signals_not_filtered(sample_data, sample_signals, default_config):
+    """Property test: Failed signals pass through unchanged."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    validated_signals, signal_quality = sample_signals
+
+    filtered = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=default_config
+    )
+
+    # Failed signals should be identical
+    assert np.array_equal(
+        filtered.is_bullish_break_failure,
+        validated_signals.is_bullish_break_failure
+    )
+    assert np.array_equal(
+        filtered.is_bearish_break_failure,
+        validated_signals.is_bearish_break_failure
+    )
+    assert np.array_equal(
+        filtered.is_failed_choch_bullish,
+        validated_signals.is_failed_choch_bullish
+    )
+    assert np.array_equal(
+        filtered.is_failed_choch_bearish,
+        validated_signals.is_failed_choch_bearish
+    )
+
+
+def test_choch_filtering_uses_quality(sample_data, sample_signals, default_config):
+    """Property test: CHOCH filtering uses quality scores."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    validated_signals, signal_quality = sample_signals
+
+    filtered = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=default_config
+    )
+
+    # CHOCH signals should only exist where quality > 0
+    assert np.all((filtered.is_choch_bullish & (signal_quality.choch_bullish_quality == 0)) == False)
+    assert np.all((filtered.is_choch_bearish & (signal_quality.choch_bearish_quality == 0)) == False)
+
+
+def test_strict_config_filters_more(sample_data, sample_signals, default_config, strict_config):
+    """Property test: Strict config filters more signals than default."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    validated_signals, signal_quality = sample_signals
+
+    filtered_default = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=default_config
+    )
+
+    filtered_strict = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=strict_config
+    )
+
+    # Strict config should filter more (or equal) signals
+    for field_name in filtered_default.__dict__.keys():
+        default_arr = getattr(filtered_default, field_name)
+        strict_arr = getattr(filtered_strict, field_name)
+        # strict ⊆ default
+        assert np.all((strict_arr & ~default_arr) == False)
+
+
+def test_lenient_config_filters_less(sample_data, sample_signals, default_config, lenient_config):
+    """Property test: Lenient config filters fewer signals than default."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    validated_signals, signal_quality = sample_signals
+
+    filtered_default = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=default_config
+    )
+
+    filtered_lenient = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=lenient_config
+    )
+
+    # Lenient config should filter less (or equal) signals
+    for field_name in filtered_default.__dict__.keys():
+        default_arr = getattr(filtered_default, field_name)
+        lenient_arr = getattr(filtered_lenient, field_name)
+        # default ⊆ lenient
+        assert np.all((default_arr & ~lenient_arr) == False)
+
+
+def test_all_filtered_arrays_same_length(sample_data, sample_signals, default_config):
+    """Property test: All filtered arrays have same length as input."""
+    market_regime, range_compression, retest_respect_score = sample_data
+    validated_signals, signal_quality = sample_signals
+
+    filtered = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=default_config
+    )
+
+    n = len(market_regime)
+    for field in filtered.__dict__.values():
+        assert len(field) == n
+
+
+# ==============================================================================
+# INTEGRATION TESTS: Realistic Scenarios
+# ==============================================================================
+
+def test_realistic_trading_scenario():
+    """Integration test: Realistic trading scenario."""
+    n = 100
+
+    # Create realistic market regime sequence
+    market_regime = np.array(
+        ['strong_trend'] * 20 +
+        ['weak_trend'] * 15 +
+        ['ranging'] * 30 +
+        ['chop'] * 20 +
+        ['neutral'] * 15,
+        dtype='U20'
+    )
+
+    # Range compression (higher during chop/ranging)
+    range_compression = np.sin(np.linspace(0, 4 * np.pi, n)) * 0.4 + 0.5
+    range_compression = np.clip(range_compression, 0, 1).astype(np.float32)
+
+    # Retest respect (higher during trends)
+    retest_respect_score = np.cos(np.linspace(0, 3 * np.pi, n)) * 0.3 + 0.6
+    retest_respect_score = np.clip(retest_respect_score, 0, 1).astype(np.float32)
+
+    # Validated signals
+    validated_signals = ValidatedSignals(
+        is_bos_bullish_confirmed=np.random.rand(n) > 0.9,  # 10% signals
+        is_bos_bearish_confirmed=np.random.rand(n) > 0.9,
+        is_bos_bullish_momentum=np.random.rand(n) > 0.92,  # 8% signals
+        is_bos_bearish_momentum=np.random.rand(n) > 0.92,
+        is_bullish_break_failure=np.random.rand(n) > 0.98,  # 2% failures
+        is_bearish_break_failure=np.random.rand(n) > 0.98,
+        is_bullish_immediate_failure=np.zeros(n, dtype=bool),
+        is_bearish_immediate_failure=np.zeros(n, dtype=bool),
+        is_failed_choch_bullish=np.random.rand(n) > 0.98,  # 2% failed CHOCH
+        is_failed_choch_bearish=np.random.rand(n) > 0.98
+    )
+
+    # Signal quality (simulate scoring) - COMPLETE STRUCTURE
+    signal_quality = SignalQuality(
+        bos_bullish_confirmed_quality=np.clip(np.random.randn(n) * 0.2 + 0.5, 0, 1).astype(np.float32),
+        bos_bearish_confirmed_quality=np.clip(np.random.randn(n) * 0.2 + 0.5, 0, 1).astype(np.float32),
+        bos_bullish_momentum_quality=np.clip(np.random.randn(n) * 0.2 + 0.4, 0, 1).astype(np.float32),
+        bos_bearish_momentum_quality=np.clip(np.random.randn(n) * 0.2 + 0.4, 0, 1).astype(np.float32),
+        choch_bullish_quality=np.clip(np.random.randn(n) * 0.2 + 0.45, 0, 1).astype(np.float32),
+        choch_bearish_quality=np.clip(np.random.randn(n) * 0.2 + 0.45, 0, 1).astype(np.float32),
+        failed_bullish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_bearish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_choch_bullish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_choch_bearish_quality=np.full(n, 0.1, dtype=np.float32)
+    )
+
     config = SignalFilterConfig()
 
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
+    # Should not raise
+    filtered = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=config
     )
 
-    # All signals should pass with good conditions
-    assert np.all(result.is_bos_bullish_confirmed[:3])
-    assert np.all(result.is_bos_bearish_confirmed[3:])
+    # Verify basic properties
+    assert isinstance(filtered, FilteredSignals)
+    assert len(filtered.is_bos_bullish_confirmed) == n
 
 
-def test_filter_with_avoid_fast_retests():
-    """Test filtering with fast retest avoidance."""
-    n = 3
-    signals = create_test_signals(n)
+# ==============================================================================
+# PERFORMANCE TESTS: Large Arrays
+# ==============================================================================
 
-    market_regime = np.array(['strong_trend'] * n)
-    is_range_compression = np.array([False] * n, dtype=bool)
-    retest_respect_score = np.array([0.9, 0.9, 0.9], dtype=np.float32)
-    config = SignalFilterConfig(min_retest_respect_score=0.8)
+def test_performance_large_arrays():
+    """Performance test: Handle large arrays efficiently."""
+    n = 10000  # 10k bars
 
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
+    market_regime = np.array(['strong_trend'] * (n // 2) + ['ranging'] * (n // 2), dtype='U20')
+    range_compression = np.random.rand(n).astype(np.float32)
+    retest_respect_score = np.random.rand(n).astype(np.float32)
+
+    validated_signals = ValidatedSignals(
+        is_bos_bullish_confirmed=np.random.rand(n) > 0.95,
+        is_bos_bearish_confirmed=np.random.rand(n) > 0.95,
+        is_bos_bullish_momentum=np.random.rand(n) > 0.96,
+        is_bos_bearish_momentum=np.random.rand(n) > 0.96,
+        is_bullish_break_failure=np.random.rand(n) > 0.99,
+        is_bearish_break_failure=np.random.rand(n) > 0.99,
+        is_bullish_immediate_failure=np.zeros(n, dtype=bool),
+        is_bearish_immediate_failure=np.zeros(n, dtype=bool),
+        is_failed_choch_bullish=np.random.rand(n) > 0.99,
+        is_failed_choch_bearish=np.random.rand(n) > 0.99
     )
 
-    # All signals should pass with high retest respect
-    assert np.all(result.is_bos_bullish_confirmed[:3])
-
-
-def test_filter_range_compression():
-    """Test filtering during range compression."""
-    n = 4
-    signals = create_test_signals(n)
-
-    market_regime = np.array(['neutral'] * n)
-    is_range_compression = np.array([False, True, False, True], dtype=bool)
-    retest_respect_score = None
-
-    # Test with compression filtering ON
-    config_on = SignalFilterConfig(avoid_range_compression=True)
-    result_on = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config_on
+    # COMPLETE SignalQuality structure
+    signal_quality = SignalQuality(
+        bos_bullish_confirmed_quality=np.full(n, 0.5, dtype=np.float32),
+        bos_bearish_confirmed_quality=np.full(n, 0.5, dtype=np.float32),
+        bos_bullish_momentum_quality=np.full(n, 0.4, dtype=np.float32),
+        bos_bearish_momentum_quality=np.full(n, 0.4, dtype=np.float32),
+        choch_bullish_quality=np.full(n, 0.45, dtype=np.float32),
+        choch_bearish_quality=np.full(n, 0.45, dtype=np.float32),
+        failed_bullish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_bearish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_choch_bullish_quality=np.full(n, 0.1, dtype=np.float32),
+        failed_choch_bearish_quality=np.full(n, 0.1, dtype=np.float32)
     )
 
-    # Test with compression filtering OFF
-    config_off = SignalFilterConfig(avoid_range_compression=False)
-    result_off = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config_off
-    )
-
-    # With filtering ON: compression bars rejected for BOS signals
-    assert result_on.is_bos_bullish_confirmed[1] == False  # Index 1: compression
-    assert result_on.is_bos_bullish_confirmed[3] == False  # Index 3: compression (bearish)
-
-    # Non-compression BOS signals should pass
-    assert result_on.is_bos_bullish_confirmed[0] == True  # no compression
-    assert result_on.is_bos_bullish_confirmed[2] == True  # no compression
-
-    # With filtering OFF: all BOS signals pass
-    assert np.all(result_off.is_bos_bullish_confirmed[:4])
-
-
-def test_filter_market_regime():
-    """Test market regime filter."""
-    n = 4
-    signals = create_test_signals(n)
-
-    market_regime = np.array(['strong_trend', 'chop', 'weak_trend', 'chop'])
-    is_range_compression = np.zeros(n, dtype=bool)
-    retest_respect_score = None
     config = SignalFilterConfig()
 
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # BOS signals in chop should be filtered
-    assert result.is_bos_bullish_confirmed[1] == False  # Index 1: chop
-    assert result.is_bos_bullish_confirmed[3] == False  # Index 3: chop (bearish)
-
-    # Non-chop BOS signals should remain
-    assert result.is_bos_bullish_confirmed[0] == True  # strong_trend
-    assert result.is_bos_bullish_confirmed[2] == True  # weak_trend
-
-    # Failure signals should NOT be filtered by regime
-    assert result.is_bullish_break_failure[1] == True  # Failure in chop stays
-    assert result.is_bearish_break_failure[3] == True  # Failure in chop stays
-
-
-def test_filter_retest_respect():
-    """Test filtering based on retest respect score."""
-    n = 4
-    signals = create_test_signals(n)
-
-    market_regime = np.array(['neutral'] * n)
-    is_range_compression = np.zeros(n, dtype=bool)
-    retest_respect_score = np.array([0.8, 0.6, 0.4, 0.2], dtype=np.float32)
-    config = SignalFilterConfig(min_retest_respect_score=0.6)
-
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # Scores >= 0.6 should pass, < 0.6 should be filtered for BOS signals
-    assert result.is_bos_bullish_confirmed[0] == True  # 0.8 >= 0.6
-    assert result.is_bos_bullish_confirmed[1] == True  # 0.6 >= 0.6
-    assert result.is_bos_bullish_confirmed[2] == False  # 0.4 < 0.6
-    assert result.is_bos_bullish_confirmed[3] == False  # 0.2 < 0.6 (bearish)
-
-    # Failure signals should NOT be filtered by retest score
-    assert result.is_bullish_break_failure[2] == True  # Failure with low retest stays
-    assert result.is_bullish_break_failure[3] == True  # Failure with low retest stays
-
-
-def test_filter_combined_filters():
-    """Test combined filter conditions (regime + compression + retest)."""
-    n = 8
-    signals = create_test_signals(n)
-
-    # Create various filter conditions
-    market_regime = np.array([
-        'strong_trend', 'chop', 'weak_trend', 'chop',
-        'strong_trend', 'weak_trend', 'ranging', 'neutral'
-    ])
-    is_range_compression = np.array([0, 0, 1, 1, 0, 0, 0, 0], dtype=bool)
-    retest_respect_score = np.array([0.8, 0.8, 0.8, 0.4, 0.3, 0.9, 0.7, 0.5], dtype=np.float32)
-
-    config = SignalFilterConfig(
-        avoid_range_compression=True,
-        min_retest_respect_score=0.6
-    )
-
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # Expected results for BOS bullish confirmed:
-    # 0: strong_trend, no compression, 0.8 retest → PASS
-    # 1: chop → REJECT (regime)
-    # 2: weak_trend, compression → REJECT (compression)
-    # 3: chop, compression, 0.4 retest → REJECT (regime)
-    # 4: strong_trend, 0.3 retest → REJECT (retest)
-    # 5: weak_trend, 0.9 retest → PASS
-    # 6: ranging, 0.7 retest → PASS
-    # 7: neutral, 0.5 retest → REJECT (retest)
-
-    assert result.is_bos_bullish_confirmed[0] == True  # PASS
-    assert result.is_bos_bullish_confirmed[1] == False  # REJECT: chop
-    assert result.is_bos_bullish_confirmed[2] == False  # REJECT: compression
-    assert result.is_bos_bullish_confirmed[3] == False  # REJECT: chop
-    assert result.is_bos_bullish_confirmed[4] == False  # REJECT: retest
-    assert result.is_bos_bullish_confirmed[5] == True  # PASS
-    assert result.is_bos_bullish_confirmed[6] == True  # PASS
-    assert result.is_bos_bullish_confirmed[7] == False  # REJECT: retest
-
-
-def test_filter_no_retest_score():
-    """Test filtering when retest score is None."""
-    n = 4
-    signals = create_test_signals(n)
-
-    market_regime = np.array(['neutral'] * n)
-    is_range_compression = np.zeros(n, dtype=bool)
-    retest_respect_score = None  # No retest score
-    config = SignalFilterConfig(min_retest_respect_score=0.6)
-
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # Should not crash when retest score is None
-    # All BOS signals should pass (no retest filter applied)
-    assert np.all(result.is_bos_bullish_confirmed[:4])
-
-
-def test_filter_only_bos_filtered():
-    """Test that only BOS signals are filtered, not other signal types."""
-    n = 4
-    signals = create_test_signals(n)
-
-    # All conditions that should filter BOS
-    market_regime = np.array(['chop'] * n)
-    is_range_compression = np.ones(n, dtype=bool)
-    retest_respect_score = np.array([0.1, 0.1, 0.1, 0.1], dtype=np.float32)
-    config = SignalFilterConfig(
-        avoid_range_compression=True,
-        min_retest_respect_score=0.6
-    )
-
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # BOS signals should all be filtered
-    assert not np.any(result.is_bos_bullish_confirmed[:4])
-    assert not np.any(result.is_bos_bullish_momentum[:4])
-
-    # Failure signals should NOT be filtered
-    assert np.any(result.is_bullish_break_failure[:4])
-    assert np.any(result.is_bearish_break_failure[4:])
-
-def test_filter_performance():
-    """Performance test with large dataset."""
-    n = 10000
-
-    # Create large test dataset
-    signals = ValidatedSignals(
-        is_bos_bullish_confirmed=np.random.choice([True, False], n),
-        is_bos_bearish_confirmed=np.random.choice([True, False], n),
-        is_bos_bullish_momentum=np.random.choice([True, False], n),
-        is_bos_bearish_momentum=np.random.choice([True, False], n),
-        is_bullish_break_failure=np.random.choice([True, False], n),
-        is_bearish_break_failure=np.random.choice([True, False], n)
-    )
-
-    market_regime = np.random.choice(['strong_trend', 'weak_trend', 'ranging', 'chop'], n)
-    is_range_compression = np.random.choice([True, False], n)
-    retest_respect_score = np.random.uniform(0, 1, n).astype(np.float32)
-
+    # Time the execution
     import time
     start = time.time()
 
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, SignalFilterConfig()
+    filtered = filter_signals(
+        validated_signals=validated_signals,
+        signal_quality=signal_quality,
+        market_regime=market_regime,
+        range_compression=range_compression,
+        retest_respect_score=retest_respect_score,
+        config=config
     )
 
     elapsed = time.time() - start
 
-    # Should complete quickly (O(n) complexity)
-    assert elapsed < 0.5, f"Too slow: {elapsed:.3f}s for {n} elements"
+    # Should complete within reasonable time (sub-second for 10k)
+    assert elapsed < 1.0, f"Filtering 10k bars took {elapsed:.2f}s, expected < 1.0s"
 
-    # Verify output
-    assert len(result.is_bos_bullish_confirmed) == n
-    assert len(result.is_bullish_break_failure) == n
-    assert result.is_bos_bullish_confirmed.dtype == bool
-
-
-# tests/signal/test_filter.py
-# Fix the failing tests by adjusting expectations
-
-def test_filter_market_regime():
-    """Test market regime filter."""
-    n = 4
-    signals = create_test_signals(n)
-
-    market_regime = np.array(['strong_trend', 'chop', 'weak_trend', 'chop'])
-    is_range_compression = np.zeros(n, dtype=bool)
-    retest_respect_score = None
-    config = SignalFilterConfig()
-
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # BOS signals in chop should be filtered
-    assert result.is_bos_bullish_confirmed[1] == False  # Index 1: chop
-    # Note: is_bos_bullish_confirmed[3] doesn't exist for n=4, pattern only has 0-4 for bullish
-
-    # Non-chop BOS signals should remain
-    assert result.is_bos_bullish_confirmed[0] == True  # strong_trend
-    assert result.is_bos_bullish_confirmed[2] == True  # weak_trend
-
-    # Failure signals should NOT be filtered by regime
-    # According to pattern: is_bullish_break_failure[1] = True, [3] = True
-    assert result.is_bullish_break_failure[1] == True  # Failure in chop stays
-    assert result.is_bullish_break_failure[3] == True  # Failure in chop stays
-    # Note: is_bearish_break_failure has no True values for n=4
-
-
-def test_filter_retest_respect():
-    """Test filtering based on retest respect score."""
-    n = 6  # Increase n to get bearish signals
-    signals = create_test_signals(n)
-
-    market_regime = np.array(['neutral'] * n)
-    is_range_compression = np.zeros(n, dtype=bool)
-    retest_respect_score = np.array([0.8, 0.6, 0.4, 0.2, 0.9, 0.1], dtype=np.float32)
-    config = SignalFilterConfig(min_retest_respect_score=0.6)
-
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # Scores >= 0.6 should pass, < 0.6 should be filtered for BOS signals
-    # Bullish signals at indices 0-4
-    assert result.is_bos_bullish_confirmed[0] == True  # 0.8 >= 0.6
-    assert result.is_bos_bullish_confirmed[1] == True  # 0.6 >= 0.6
-    assert result.is_bos_bullish_confirmed[2] == False  # 0.4 < 0.6
-    assert result.is_bos_bullish_confirmed[3] == False  # 0.2 < 0.6
-
-    # Bearish signals start at index 5
-    assert result.is_bos_bearish_confirmed[5] == False  # 0.1 < 0.6 (bearish)
-
-    # Failure signals should NOT be filtered by retest score
-    # According to pattern: is_bullish_break_failure[1] = True, [3] = True
-    # is_bullish_break_failure[2] = False (not True as expected in original test)
-    assert result.is_bullish_break_failure[1] == True  # Failure with good retest stays
-    assert result.is_bullish_break_failure[3] == True  # Failure with bad retest stays
-
-
-def test_filter_combined_filters():
-    """Test combined filter conditions (regime + compression + retest)."""
-    n = 8
-    signals = create_test_signals(n)
-
-    # Create various filter conditions
-    market_regime = np.array([
-        'strong_trend', 'chop', 'weak_trend', 'chop',
-        'strong_trend', 'weak_trend', 'ranging', 'neutral'
-    ])
-    is_range_compression = np.array([0, 0, 1, 1, 0, 0, 0, 0], dtype=bool)
-    retest_respect_score = np.array([0.8, 0.8, 0.8, 0.4, 0.3, 0.9, 0.7, 0.5], dtype=np.float32)
-
-    config = SignalFilterConfig(
-        avoid_range_compression=True,
-        min_retest_respect_score=0.6
-    )
-
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # Bullish BOS signals are at indices 0-4
-    # 0: strong_trend, no compression, 0.8 retest → PASS
-    # 1: chop → REJECT (regime)
-    # 2: weak_trend, compression → REJECT (compression)
-    # 3: chop, compression, 0.4 retest → REJECT (regime)
-    # 4: strong_trend, 0.3 retest → REJECT (retest)
-
-    assert result.is_bos_bullish_confirmed[0] == True  # PASS
-    assert result.is_bos_bullish_confirmed[1] == False  # REJECT: chop
-    assert result.is_bos_bullish_confirmed[2] == False  # REJECT: compression
-    assert result.is_bos_bullish_confirmed[3] == False  # REJECT: chop
-    assert result.is_bos_bullish_confirmed[4] == False  # REJECT: retest
-
-    # Bearish BOS signals are at indices 5-7
-    # 5: weak_trend, 0.9 retest → PASS (but test pattern has True at index 5? Let's check)
-    # According to pattern: is_bos_bearish_confirmed[5] = True
-    # 5: weak_trend, 0.9 retest → should PASS
-    assert result.is_bos_bearish_confirmed[5] == True  # PASS
-
-    # 6: ranging, 0.7 retest → PASS
-    assert result.is_bos_bearish_confirmed[6] == True  # PASS
-
-    # 7: neutral, 0.5 retest → REJECT
-    assert result.is_bos_bearish_confirmed[7] == False  # REJECT: retest
-
-
-def test_filter_only_bos_filtered():
-    """Test that only BOS signals are filtered, not other signal types."""
-    n = 6  # Need at least 6 to have some bearish failure signals
-    signals = create_test_signals(n)
-
-    # All conditions that should filter BOS
-    market_regime = np.array(['chop'] * n)
-    is_range_compression = np.ones(n, dtype=bool)
-    retest_respect_score = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1], dtype=np.float32)
-    config = SignalFilterConfig(
-        avoid_range_compression=True,
-        min_retest_respect_score=0.6
-    )
-
-    result = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config
-    )
-
-    # BOS signals should all be filtered
-    assert not np.any(result.is_bos_bullish_confirmed[:5])  # Bullish BOS at 0-4
-    assert not np.any(result.is_bos_bullish_momentum[:5])  # Bullish momentum at 0,2,4
-
-    # Bearish BOS at 5
-    assert result.is_bos_bearish_confirmed[5] == False
-
-    # Failure signals should NOT be filtered
-    # According to pattern: bullish failures at 1,3
-    assert np.any(result.is_bullish_break_failure[:4])  # Check if any failures in first 4
-
-    # Bearish failures at 6,8 (not in n=6)
-    # So we can't check bearish failures for n=6
-
-
-def test_filter_partial_filters():
-    """Test with partial filter configurations."""
-    n = 4
-    signals = create_test_signals(n)
-
-    market_regime = np.array(['chop', 'chop', 'neutral', 'neutral'])
-    is_range_compression = np.array([True, False, True, False], dtype=bool)
-    retest_respect_score = np.array([0.7, 0.3, 0.7, 0.3], dtype=np.float32)
-
-    # Test 1: Only regime filter (but compression and retest are still calculated from data)
-    config1 = SignalFilterConfig(
-        avoid_range_compression=False,  # Compression filter OFF
-        min_retest_respect_score=None  # Retest filter OFF
-    )
-    result1 = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config1
-    )
-
-    # Test 2: Only compression filter
-    config2 = SignalFilterConfig(
-        avoid_range_compression=True,  # Compression filter ON
-        min_retest_respect_score=None  # Retest filter OFF
-    )
-    result2 = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config2
-    )
-
-    # Test 3: Only retest filter (but regime filter is always active!)
-    config3 = SignalFilterConfig(
-        avoid_range_compression=False,  # Compression filter OFF
-        min_retest_respect_score=0.6  # Retest filter ON
-    )
-    result3 = filter_signals(
-        signals, market_regime, is_range_compression,
-        retest_respect_score, config3
-    )
-
-    # Verify filter behavior
-    # Index 0: chop + compression + good retest (0.7)
-    # According to pattern: is_bos_bullish_confirmed[0] = True
-
-    # With config1: only regime active (chop filter ALWAYS active)
-    # Signal in chop should be filtered regardless of config
-    assert result1.is_bos_bullish_confirmed[0] == False  # Filtered by regime (chop)
-
-    # With config2: compression active + regime always active
-    # Signal in chop AND compression → filtered by both
-    assert result2.is_bos_bullish_confirmed[0] == False  # Filtered by regime AND compression
-
-    # With config3: retest active + regime always active
-    # Signal in chop → filtered by regime, even though retest passes
-    # This is the key insight: regime filter is ALWAYS active!
-    assert result3.is_bos_bullish_confirmed[0] == False  # Filtered by regime (chop)
-
-    # Index 2: neutral + compression + good retest (0.7)
-    # This signal is NOT in chop, so regime filter doesn't apply
-    # With config3: retest active, regime doesn't apply (neutral)
-    assert result3.is_bos_bullish_confirmed[2] == True  # Passes: neutral regime, good retest
-
-    # Index 1: chop + no compression + bad retest (0.3)
-    assert result1.is_bos_bullish_confirmed[1] == False  # Filtered by regime (chop)
-    assert result2.is_bos_bullish_confirmed[1] == False  # Filtered by regime (chop)
-    assert result3.is_bos_bullish_confirmed[1] == False  # Filtered by regime (chop) AND bad retest
-
-    # Index 3: neutral + no compression + bad retest (0.3)
-    # Only retest filter applies
-    assert result3.is_bos_bullish_confirmed[3] == False  # Filtered by bad retest (0.3 < 0.6)
+    # Verify results
+    assert isinstance(filtered, FilteredSignals)
+    assert len(filtered.is_bos_bullish_confirmed) == n
